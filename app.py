@@ -304,7 +304,7 @@ class MarketTerminalApp(tk.Tk):
             highlightbackground=GRID,
             highlightthickness=1,
         )
-        self.chart_window.place_forget()
+        self.chart_window.place(x=0, y=0, width=960, height=560)
         self.chart_titlebar = tk.Frame(self.chart_window, bg=GRID, height=28, cursor="fleur")
         self.chart_titlebar.pack(fill=tk.X)
         self.chart_titlebar.pack_propagate(False)
@@ -429,7 +429,23 @@ class MarketTerminalApp(tk.Tk):
             restored = True
         self._constrain_chart_window_to_desktop(None)
         self._constrain_watchlist_window_to_desktop()
+        self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
+
+    def _apply_saved_function_layout_without_constraints(self) -> None:
+        for name, widget in (
+            ("watchlist", self.watchlist_window),
+            ("chart", self.chart_window),
+        ):
+            geometry = self.saved_layout_state.get(name)
+            if not isinstance(geometry, dict):
+                continue
+            widget.place_configure(
+                x=int(geometry.get("x", widget.winfo_x())),
+                y=int(geometry.get("y", widget.winfo_y())),
+                width=int(geometry.get("width", widget.winfo_width())),
+                height=int(geometry.get("height", widget.winfo_height())),
+            )
 
     def _build_group_selector(
         self, parent: tk.Widget, variable: tk.StringVar, command
@@ -617,7 +633,7 @@ class MarketTerminalApp(tk.Tk):
             highlightbackground=GRID,
             highlightthickness=1,
         )
-        self.watchlist_window.place_forget()
+        self.watchlist_window.place(x=980, y=0, width=400, height=500)
         self.watchlist_titlebar = tk.Frame(self.watchlist_window, bg=GRID, height=28, cursor="fleur")
         self.watchlist_titlebar.pack(fill=tk.X)
         self.watchlist_titlebar.pack_propagate(False)
