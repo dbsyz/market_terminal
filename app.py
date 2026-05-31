@@ -158,6 +158,8 @@ class MarketTerminalApp(tk.Tk):
         self.floating_window_resize: dict[str, int] | None = None
         self.layout_save_after_id: str | None = None
         self.layout_manually_saved = False
+        self.saved_layout_snapshot: dict = {}
+        self.layout_dirty = False
         self.geometry_save_after_id: str | None = None
         source_root = Path(__file__).resolve().parent
         self.source_watch_paths = tuple(source_root / name for name in RUNTIME_SOURCE_FILES)
@@ -302,7 +304,7 @@ class MarketTerminalApp(tk.Tk):
             highlightbackground=GRID,
             highlightthickness=1,
         )
-        self.chart_window.place(x=0, y=0, width=960, height=560)
+        self.chart_window.place_forget()
         self.chart_titlebar = tk.Frame(self.chart_window, bg=GRID, height=28, cursor="fleur")
         self.chart_titlebar.pack(fill=tk.X)
         self.chart_titlebar.pack_propagate(False)
@@ -393,6 +395,7 @@ class MarketTerminalApp(tk.Tk):
             self.after(80, self._layout_initial_workspace_windows)
             return
         if self._restore_saved_function_layout():
+            self._mark_layout_saved_snapshot()
             return
         width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH + 360)
         height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
@@ -405,6 +408,7 @@ class MarketTerminalApp(tk.Tk):
             height=min(height, 520),
         )
         self.chart_window.place_configure(x=watch_width + 10, y=0, width=chart_width, height=height)
+        self._mark_layout_saved_snapshot()
 
     def _restore_saved_function_layout(self) -> bool:
         if not self.saved_layout_state:
@@ -425,23 +429,7 @@ class MarketTerminalApp(tk.Tk):
             restored = True
         self._constrain_chart_window_to_desktop(None)
         self._constrain_watchlist_window_to_desktop()
-        self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
-
-    def _apply_saved_function_layout_without_constraints(self) -> None:
-        for name, widget in (
-            ("watchlist", self.watchlist_window),
-            ("chart", self.chart_window),
-        ):
-            geometry = self.saved_layout_state.get(name)
-            if not isinstance(geometry, dict):
-                continue
-            widget.place_configure(
-                x=int(geometry.get("x", widget.winfo_x())),
-                y=int(geometry.get("y", widget.winfo_y())),
-                width=int(geometry.get("width", widget.winfo_width())),
-                height=int(geometry.get("height", widget.winfo_height())),
-            )
 
     def _build_group_selector(
         self, parent: tk.Widget, variable: tk.StringVar, command
@@ -474,7 +462,7 @@ class MarketTerminalApp(tk.Tk):
         width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
         height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
         self.chart_window.place_configure(x=0, y=0, width=width, height=height)
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
 
     def _start_chart_window_drag(self, event: tk.Event) -> str:
         self.chart_window.lift()
@@ -498,12 +486,12 @@ class MarketTerminalApp(tk.Tk):
         left = max(0, min(left, max(desktop_width - width, 0)))
         top = max(0, min(top, max(desktop_height - height, 0)))
         self.chart_window.place_configure(x=left, y=top)
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _finish_chart_window_drag(self, _event: tk.Event) -> str:
         self.floating_window_drag = None
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _start_chart_window_resize(self, event: tk.Event) -> str:
@@ -528,12 +516,12 @@ class MarketTerminalApp(tk.Tk):
         width = max(MIN_CHART_WINDOW_WIDTH, min(width, max(desktop_width - left, MIN_CHART_WINDOW_WIDTH)))
         height = max(MIN_CHART_WINDOW_HEIGHT, min(height, max(desktop_height - top, MIN_CHART_WINDOW_HEIGHT)))
         self.chart_window.place_configure(width=width, height=height)
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _finish_chart_window_resize(self, _event: tk.Event) -> str:
         self.floating_window_resize = None
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _constrain_chart_window_to_desktop(self, _event: tk.Event) -> None:
@@ -584,12 +572,12 @@ class MarketTerminalApp(tk.Tk):
         left = max(0, min(left, max(desktop_width - width, 0)))
         top = max(0, min(top, max(desktop_height - height, 0)))
         self.watchlist_window.place_configure(x=left, y=top)
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _finish_watchlist_window_drag(self, _event: tk.Event) -> str:
         self.floating_window_drag = None
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _start_watchlist_window_resize(self, event: tk.Event) -> str:
@@ -614,12 +602,12 @@ class MarketTerminalApp(tk.Tk):
         width = max(360, min(width, max(desktop_width - left, 360)))
         height = max(260, min(height, max(desktop_height - top, 260)))
         self.watchlist_window.place_configure(width=width, height=height)
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _finish_watchlist_window_resize(self, _event: tk.Event) -> str:
         self.floating_window_resize = None
-        self._save_function_layout()
+        self._mark_layout_dirty_if_changed()
         return "break"
 
     def _build_watchlist_window(self) -> None:
@@ -629,7 +617,7 @@ class MarketTerminalApp(tk.Tk):
             highlightbackground=GRID,
             highlightthickness=1,
         )
-        self.watchlist_window.place(x=980, y=0, width=400, height=500)
+        self.watchlist_window.place_forget()
         self.watchlist_titlebar = tk.Frame(self.watchlist_window, bg=GRID, height=28, cursor="fleur")
         self.watchlist_titlebar.pack(fill=tk.X)
         self.watchlist_titlebar.pack_propagate(False)
@@ -885,6 +873,14 @@ class MarketTerminalApp(tk.Tk):
         self._save_watchlist_state()
         if self.layout_save_after_id:
             self.after_cancel(self.layout_save_after_id)
+        if self.layout_dirty:
+            save_layout = messagebox.askyesno(
+                "Unsaved layout changes",
+                "You have unsaved changes in your layout. Save them?",
+                parent=self,
+            )
+            if save_layout:
+                self._save_function_layout()
         self.destroy()
 
     def _schedule_function_layout_save(self) -> None:
@@ -905,6 +901,8 @@ class MarketTerminalApp(tk.Tk):
         }
         save_layout_state(self.layout_state_path, layout)
         self.saved_layout_state = layout
+        self.saved_layout_snapshot = layout
+        self.layout_dirty = False
         if show_status:
             watch = layout["watchlist"]
             chart = layout["chart"]
@@ -913,6 +911,20 @@ class MarketTerminalApp(tk.Tk):
                 f" | Watchlist {watch['width']}x{watch['height']}+{watch['x']}+{watch['y']}"
                 f" | Chart {chart['width']}x{chart['height']}+{chart['x']}+{chart['y']}"
             )
+
+    def _current_function_layout(self) -> dict:
+        self.update_idletasks()
+        return {
+            "watchlist": window_place_geometry(self.watchlist_window),
+            "chart": window_place_geometry(self.chart_window),
+        }
+
+    def _mark_layout_saved_snapshot(self) -> None:
+        self.saved_layout_snapshot = self._current_function_layout()
+        self.layout_dirty = False
+
+    def _mark_layout_dirty_if_changed(self) -> None:
+        self.layout_dirty = self._current_function_layout() != self.saved_layout_snapshot
 
     def _build_suggestion_popup(self) -> None:
         self.suggestion_popup = tk.Toplevel(self)
