@@ -94,6 +94,7 @@ class MarketTerminalApp(tk.Tk):
         self.geometry(self.saved_window_state["geometry"])
 
         self.search_var = tk.StringVar(value="")
+        self.watchlist_search_var = tk.StringVar(value="")
         self.mode_var = tk.StringVar(value="Intraday")
         self.status_var = tk.StringVar(
             value="Public/delayed market data via Yahoo Finance | Identifier mapping via OpenFIGI"
@@ -121,6 +122,9 @@ class MarketTerminalApp(tk.Tk):
         self.results: list[Instrument] = []
         self.raw_results: list[Instrument] = []
         self.chart_instruments: list[Instrument] = []
+        self.watchlist_instruments: dict[str, Instrument] = {}
+        self.watchlist_target_item: str | None = None
+        self.watchlist_editor: tk.Entry | None = None
         self.add_to_compare_mode = False
         self.suggestion_anchor = None
         self.selected_instrument: Instrument | None = None
@@ -154,6 +158,7 @@ class MarketTerminalApp(tk.Tk):
         self._build_controls()
         self._build_chart()
         self.search_var.trace_add("write", self._on_search_text_changed)
+        self.watchlist_search_var.trace_add("write", self._on_watchlist_search_text_changed)
         self.bind("<ButtonPress-1>", self._dismiss_suggestions_on_click, add="+")
         self.bind_all("<Control-f>", self._focus_primary_search)
         self.bind_all("<Control-F>", self._focus_primary_search)
@@ -345,7 +350,6 @@ class MarketTerminalApp(tk.Tk):
         self.chart_resize_grip.bind("<ButtonPress-1>", self._start_chart_window_resize)
         self.chart_resize_grip.bind("<B1-Motion>", self._resize_chart_window)
         self.chart_resize_grip.bind("<ButtonRelease-1>", self._finish_chart_window_resize)
-        self.after_idle(self._maximize_chart_window)
         ttk.Label(self.chart_panel, textvariable=self.identity_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 3)
         )
@@ -359,6 +363,22 @@ class MarketTerminalApp(tk.Tk):
             anchor=tk.W, pady=(0, 4)
         )
         self._build_suggestion_popup()
+        self._build_watchlist_window()
+        self.after_idle(self._layout_initial_workspace_windows)
+
+    def _layout_initial_workspace_windows(self) -> None:
+        self.desktop.update_idletasks()
+        width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH + 360)
+        height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
+        watch_width = min(430, max(360, int(width * 0.32)))
+        chart_width = max(MIN_CHART_WINDOW_WIDTH, width - watch_width - 10)
+        self.chart_window.place_configure(x=0, y=0, width=chart_width, height=height)
+        self.watchlist_window.place_configure(
+            x=chart_width + 10,
+            y=0,
+            width=watch_width,
+            height=min(height, 520),
+        )
 
     def _maximize_chart_window(self) -> None:
         self.desktop.update_idletasks()
@@ -432,6 +452,205 @@ class MarketTerminalApp(tk.Tk):
         width = min(max(self.chart_window.winfo_width(), MIN_CHART_WINDOW_WIDTH), desktop_width - left)
         height = min(max(self.chart_window.winfo_height(), MIN_CHART_WINDOW_HEIGHT), desktop_height - top)
         self.chart_window.place_configure(x=left, y=top, width=width, height=height)
+
+    def _start_watchlist_window_drag(self, event: tk.Event) -> str:
+        self.watchlist_window.lift()
+        self.floating_window_drag = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "left": self.watchlist_window.winfo_x(),
+            "top": self.watchlist_window.winfo_y(),
+        }
+        return "break"
+
+    def _drag_watchlist_window(self, event: tk.Event) -> str:
+        if not self.floating_window_drag:
+            return "break"
+        desktop_width = max(self.desktop.winfo_width(), 360)
+        desktop_height = max(self.desktop.winfo_height(), 300)
+        width = self.watchlist_window.winfo_width()
+        height = self.watchlist_window.winfo_height()
+        left = self.floating_window_drag["left"] + event.x_root - self.floating_window_drag["x"]
+        top = self.floating_window_drag["top"] + event.y_root - self.floating_window_drag["y"]
+        left = max(0, min(left, max(desktop_width - width, 0)))
+        top = max(0, min(top, max(desktop_height - height, 0)))
+        self.watchlist_window.place_configure(x=left, y=top)
+        return "break"
+
+    def _finish_watchlist_window_drag(self, _event: tk.Event) -> str:
+        self.floating_window_drag = None
+        return "break"
+
+    def _start_watchlist_window_resize(self, event: tk.Event) -> str:
+        self.watchlist_window.lift()
+        self.floating_window_resize = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "width": self.watchlist_window.winfo_width(),
+            "height": self.watchlist_window.winfo_height(),
+        }
+        return "break"
+
+    def _resize_watchlist_window(self, event: tk.Event) -> str:
+        if not self.floating_window_resize:
+            return "break"
+        left = self.watchlist_window.winfo_x()
+        top = self.watchlist_window.winfo_y()
+        desktop_width = max(self.desktop.winfo_width(), 360)
+        desktop_height = max(self.desktop.winfo_height(), 300)
+        width = self.floating_window_resize["width"] + event.x_root - self.floating_window_resize["x"]
+        height = self.floating_window_resize["height"] + event.y_root - self.floating_window_resize["y"]
+        width = max(360, min(width, max(desktop_width - left, 360)))
+        height = max(260, min(height, max(desktop_height - top, 260)))
+        self.watchlist_window.place_configure(width=width, height=height)
+        return "break"
+
+    def _finish_watchlist_window_resize(self, _event: tk.Event) -> str:
+        self.floating_window_resize = None
+        return "break"
+
+    def _build_watchlist_window(self) -> None:
+        self.watchlist_window = tk.Frame(
+            self.desktop,
+            bg=PANEL,
+            highlightbackground=GRID,
+            highlightthickness=1,
+        )
+        self.watchlist_window.place(x=980, y=0, width=400, height=500)
+        self.watchlist_titlebar = tk.Frame(self.watchlist_window, bg=GRID, height=28, cursor="fleur")
+        self.watchlist_titlebar.pack(fill=tk.X)
+        self.watchlist_titlebar.pack_propagate(False)
+        label = tk.Label(
+            self.watchlist_titlebar,
+            text="WATCHLIST",
+            bg=GRID,
+            fg=TEXT,
+            font=("Segoe UI", 9, "bold"),
+            padx=9,
+        )
+        label.pack(side=tk.LEFT)
+        for widget in (self.watchlist_titlebar, label):
+            widget.bind("<ButtonPress-1>", self._start_watchlist_window_drag)
+            widget.bind("<B1-Motion>", self._drag_watchlist_window)
+            widget.bind("<ButtonRelease-1>", self._finish_watchlist_window_drag)
+        tk.Button(
+            self.watchlist_titlebar,
+            text="REFRESH",
+            command=self.refresh_watchlist,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        content = ttk.Frame(self.watchlist_window, style="Panel.TFrame", padding=7)
+        content.pack(fill=tk.BOTH, expand=True)
+        self.watchlist_tree = ttk.Treeview(
+            content,
+            columns=("asset", "last", "bid", "ask", "volume"),
+            show="headings",
+            height=12,
+        )
+        for column, title, width in (
+            ("asset", "Asset", 145),
+            ("last", "Last", 70),
+            ("bid", "Bid", 70),
+            ("ask", "Ask", 70),
+            ("volume", "Volume", 90),
+        ):
+            self.watchlist_tree.heading(column, text=title)
+            self.watchlist_tree.column(column, width=width, anchor=tk.W)
+        self.watchlist_tree.pack(fill=tk.BOTH, expand=True)
+        self.watchlist_tree.bind("<Double-Button-1>", self._begin_watchlist_asset_search)
+        actions = ttk.Frame(content, style="Panel.TFrame")
+        actions.pack(fill=tk.X, pady=(7, 0))
+        ttk.Button(actions, text="ADD ROW", command=self._add_watchlist_row).pack(side=tk.LEFT)
+        ttk.Button(actions, text="REMOVE", command=self._remove_watchlist_row).pack(
+            side=tk.LEFT, padx=(5, 0)
+        )
+        ttk.Label(
+            content,
+            text="Double-click Asset to search and fill row.",
+            style="Status.TLabel",
+        ).pack(anchor=tk.W, pady=(6, 0))
+        self.watchlist_resize_grip = tk.Frame(
+            self.watchlist_window,
+            bg=ORANGE,
+            width=15,
+            height=15,
+            cursor="size_nw_se",
+        )
+        self.watchlist_resize_grip.place(relx=1.0, rely=1.0, anchor=tk.SE)
+        self.watchlist_resize_grip.bind("<ButtonPress-1>", self._start_watchlist_window_resize)
+        self.watchlist_resize_grip.bind("<B1-Motion>", self._resize_watchlist_window)
+        self.watchlist_resize_grip.bind("<ButtonRelease-1>", self._finish_watchlist_window_resize)
+        for _position in range(8):
+            self._add_watchlist_row()
+
+    def _add_watchlist_row(self) -> None:
+        item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
+        self.watchlist_tree.insert("", tk.END, iid=item, values=("", "", "", "", ""))
+
+    def _remove_watchlist_row(self) -> None:
+        for item in self.watchlist_tree.selection():
+            self.watchlist_instruments.pop(item, None)
+            self.watchlist_tree.delete(item)
+
+    def _begin_watchlist_asset_search(self, event: tk.Event) -> str:
+        item = self.watchlist_tree.identify_row(event.y)
+        column = self.watchlist_tree.identify_column(event.x)
+        if not item or column != "#1":
+            return "break"
+        self._destroy_watchlist_editor()
+        self.watchlist_target_item = item
+        self.add_to_compare_mode = False
+        self.search_action_var.set("SET WATCHLIST ASSET")
+        bounds = self.watchlist_tree.bbox(item, column)
+        if not bounds:
+            return "break"
+        x, y, width, height = bounds
+        current = self.watchlist_tree.set(item, "asset")
+        self.watchlist_search_var.set(current)
+        self.watchlist_editor = tk.Entry(
+            self.watchlist_tree,
+            textvariable=self.watchlist_search_var,
+            bg=BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 10),
+        )
+        self.watchlist_editor.place(x=x, y=y, width=width, height=height)
+        self.watchlist_editor.focus_set()
+        self.watchlist_editor.selection_range(0, tk.END)
+        self.watchlist_editor.bind("<Return>", self._accept_or_search)
+        self.watchlist_editor.bind("<Escape>", lambda _event: self._cancel_watchlist_editor())
+        self.watchlist_editor.bind("<Down>", lambda _event: self._move_suggestion_selection(1))
+        self.watchlist_editor.bind("<Up>", lambda _event: self._move_suggestion_selection(-1))
+        self.watchlist_editor.bind(
+            "<FocusIn>", lambda _event: self._set_suggestion_anchor(self.watchlist_editor)
+        )
+        self.suggestion_anchor = self.watchlist_editor
+        if self.watchlist_search_var.get().strip():
+            self.search_assets()
+        self.status_var.set("Type in the watchlist cell, then select a matching asset.")
+        return "break"
+
+    def _cancel_watchlist_editor(self) -> str:
+        self.watchlist_target_item = None
+        self._destroy_watchlist_editor()
+        self._hide_suggestions(restore_focus=False)
+        self.search_action_var.set("OPEN SECURITY")
+        self.watchlist_search_var.set("")
+        return "break"
+
+    def _destroy_watchlist_editor(self) -> None:
+        if self.watchlist_editor is not None:
+            self.watchlist_editor.destroy()
+            self.watchlist_editor = None
 
     def _build_update_banner(self) -> None:
         self.update_banner = tk.Frame(
@@ -707,11 +926,34 @@ class MarketTerminalApp(tk.Tk):
             return
         self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
 
+    def _on_watchlist_search_text_changed(self, *_args) -> None:
+        if self.suggestion_anchor != self.watchlist_editor:
+            return
+        if self.search_after_id:
+            self.after_cancel(self.search_after_id)
+            self.search_after_id = None
+        query = self.watchlist_search_var.get().strip()
+        if not query:
+            self.search_request_id += 1
+            self.results = []
+            self.raw_results = []
+            self._hide_suggestions(restore_focus=False)
+            return
+        self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
+
+    def _active_search_query(self) -> str:
+        if self.suggestion_anchor == self.watchlist_editor:
+            return self.watchlist_search_var.get().strip()
+        return self.search_var.get().strip()
+
     def _set_suggestion_anchor(self, entry) -> None:
         self.suggestion_anchor = entry
         if entry == self.compare_search_entry:
             self.add_to_compare_mode = True
             self.search_action_var.set("ADD SECURITY TO COMPARISON")
+        elif entry == self.watchlist_editor:
+            self.add_to_compare_mode = False
+            self.search_action_var.set("SET WATCHLIST ASSET")
         else:
             self.add_to_compare_mode = False
             self.search_action_var.set("OPEN SECURITY")
@@ -721,8 +963,13 @@ class MarketTerminalApp(tk.Tk):
         anchor = self.suggestion_anchor or self.search_entry
         height = 338
         is_compare = anchor == self.compare_search_entry
-        minimum_width = 625 if is_compare else 720
-        preferred_width = minimum_width if is_compare else max(minimum_width, anchor.winfo_width())
+        is_watchlist = anchor == self.watchlist_editor
+        minimum_width = 420 if is_watchlist else 625 if is_compare else 720
+        preferred_width = (
+            max(minimum_width, anchor.winfo_width() + 320)
+            if is_watchlist
+            else minimum_width if is_compare else max(minimum_width, anchor.winfo_width())
+        )
         window_left = self.winfo_rootx() + 12
         window_right = self.winfo_rootx() + self.winfo_width() - 12
         window_top = self.winfo_rooty() + 12
@@ -740,7 +987,7 @@ class MarketTerminalApp(tk.Tk):
             window_bottom=window_bottom,
             align_right=is_compare,
         )
-        self._size_suggestion_columns(width, is_compare)
+        self._size_suggestion_columns(width, is_compare or is_watchlist)
         self.suggestion_popup.geometry(f"{width}x{height}+{x}+{y}")
         self.suggestion_popup.deiconify()
         self.suggestion_popup.lift()
@@ -760,7 +1007,8 @@ class MarketTerminalApp(tk.Tk):
         self.suggestion_popup.withdraw()
         if restore_focus:
             anchor = self.suggestion_anchor or self.search_entry
-            anchor.focus_set()
+            if anchor.winfo_exists():
+                anchor.focus_set()
         return "break"
 
     def _move_suggestion_selection(self, direction: int) -> str:
@@ -782,7 +1030,10 @@ class MarketTerminalApp(tk.Tk):
     def _dismiss_suggestions_on_click(self, event: tk.Event) -> None:
         if not self.text_selection_dragging:
             self._clear_text_selection_outline()
-        if event.widget != self.search_entry and self.suggestion_popup.state() != "withdrawn":
+        active_anchors = [self.search_entry]
+        if self.watchlist_editor is not None:
+            active_anchors.append(self.watchlist_editor)
+        if event.widget not in active_anchors and self.suggestion_popup.state() != "withdrawn":
             self.suggestion_popup.withdraw()
         if event.widget not in (
             self.time_range_button,
@@ -1398,7 +1649,7 @@ class MarketTerminalApp(tk.Tk):
         if self.search_after_id:
             self.after_cancel(self.search_after_id)
             self.search_after_id = None
-        query = self.search_var.get().strip()
+        query = self._active_search_query()
         if not query:
             self.search_request_id += 1
             self.results = []
@@ -1478,11 +1729,55 @@ class MarketTerminalApp(tk.Tk):
         return self.results[int(selected[0])]
 
     def _accept_search_result(self) -> str:
-        if self.add_to_compare_mode:
+        if self.watchlist_target_item:
+            self._set_watchlist_search_result()
+        elif self.add_to_compare_mode:
             self._add_search_result()
         else:
             self._open_search_result()
         return "break"
+
+    def _set_watchlist_search_result(self) -> None:
+        instrument = self._selected_search_instrument()
+        item = self.watchlist_target_item
+        if not instrument or not item:
+            return
+        self._hide_suggestions(restore_focus=False)
+        self.watchlist_target_item = None
+        self._destroy_watchlist_editor()
+        self.watchlist_instruments[item] = instrument
+        self.watchlist_tree.item(
+            item,
+            values=(watchlist_asset_label(instrument), "Loading", "", "", ""),
+        )
+        self.search_action_var.set("OPEN SECURITY")
+        self.watchlist_search_var.set("")
+        self._refresh_watchlist_item(item, instrument)
+
+    def refresh_watchlist(self) -> None:
+        for item, instrument in list(self.watchlist_instruments.items()):
+            self._refresh_watchlist_item(item, instrument)
+
+    def _refresh_watchlist_item(self, item: str, instrument: Instrument) -> None:
+        self._run_background(
+            lambda: self.provider.quote_snapshot(instrument),
+            lambda quote: self._update_watchlist_quote(item, instrument, quote),
+            "Watchlist quote failed",
+            lambda: item in self.watchlist_instruments
+            and self.watchlist_instruments[item].symbol == instrument.symbol,
+        )
+
+    def _update_watchlist_quote(self, item: str, instrument: Instrument, quote) -> None:
+        self.watchlist_tree.item(
+            item,
+            values=(
+                watchlist_asset_label(instrument),
+                format_quote_value(quote.last),
+                format_quote_value(quote.bid),
+                format_quote_value(quote.ask),
+                format_volume_value(quote.volume) if quote.volume is not None else "",
+            ),
+        )
 
     def _open_search_result(self) -> None:
         instrument = self._selected_search_instrument()
@@ -2585,6 +2880,20 @@ def instrument_fundamentals_text(instrument: Instrument) -> str:
     if instrument.market_cap is not None:
         return f"Market Cap: {format_currency_size(instrument.market_cap)}"
     return ""
+
+
+def watchlist_asset_label(instrument: Instrument) -> str:
+    return f"{instrument.symbol}  {instrument.name}".strip()
+
+
+def format_quote_value(value: float | None) -> str:
+    if value is None:
+        return ""
+    if abs(value) >= 1_000:
+        return f"{value:,.2f}"
+    if abs(value) >= 10:
+        return f"{value:,.3f}"
+    return f"{value:,.4f}"
 
 
 def format_market_cap(market_cap: float | None) -> str:

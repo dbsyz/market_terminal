@@ -12,7 +12,7 @@ import requests
 import yfinance as yf
 import yfinance.cache as yf_cache
 
-from .models import Instrument, MarketSession, RangeSpec
+from .models import Instrument, MarketSession, QuoteSnapshot, RangeSpec
 from .portfolio_index import (
     PORTFOLIO_INDEX_SYMBOL,
     load_portfolio_index_history,
@@ -488,6 +488,40 @@ class MarketDataProvider:
         metadata = yf.Ticker(instrument.symbol).get_history_metadata()
         return build_market_session(metadata)
 
+    def quote_snapshot(self, instrument: Instrument) -> QuoteSnapshot:
+        if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
+            frame = load_portfolio_index_history(RangeSpec("MAX", "max", "1d"))
+            last = float(frame["Close"].iloc[-1]) if not frame.empty else None
+            volume = (
+                float(frame["Volume"].iloc[-1])
+                if not frame.empty and "Volume" in frame.columns
+                else None
+            )
+            return QuoteSnapshot(last=last, volume=volume)
+        ticker = yf.Ticker(instrument.symbol)
+        try:
+            fast = dict(ticker.fast_info or {})
+        except Exception:
+            fast = {}
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = {}
+        return QuoteSnapshot(
+            last=_first_optional_float(
+                fast,
+                info,
+                ("last_price", "lastPrice", "regularMarketPrice", "currentPrice", "previousClose"),
+            ),
+            bid=_first_optional_float(fast, info, ("bid", "bidPrice")),
+            ask=_first_optional_float(fast, info, ("ask", "askPrice")),
+            volume=_first_optional_float(
+                fast,
+                info,
+                ("last_volume", "lastVolume", "regularMarketVolume", "volume"),
+            ),
+        )
+
 
 def _unique_instruments(instruments: list[Instrument]) -> list[Instrument]:
     unique: dict[str, Instrument] = {}
@@ -515,6 +549,17 @@ def _as_optional_float(value) -> float | None:
         return float(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _first_optional_float(*mappings_and_keys) -> float | None:
+    *mappings, keys = mappings_and_keys
+    for key in keys:
+        for mapping in mappings:
+            value = mapping.get(key) if hasattr(mapping, "get") else None
+            parsed = _as_optional_float(value)
+            if parsed is not None:
+                return parsed
+    return None
 
 
 def _lookup_isin_by_euronext_listing(symbol: str) -> str:

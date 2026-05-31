@@ -321,6 +321,26 @@ class MarketDataProviderTests(unittest.TestCase):
 
         self.assertEqual(instruments[0].market_cap, 3_000_000_000_000)
 
+    def test_quote_snapshot_reads_fast_info_and_info_fallbacks(self) -> None:
+        class TickerStub:
+            fast_info = {"last_price": 101.5}
+            info = {"bid": 101.4, "ask": 101.6, "regularMarketVolume": 123456}
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            quote = provider.quote_snapshot(Instrument("AAPL", "Apple"))
+        finally:
+            providers.yf.Ticker = original_ticker
+
+        self.assertEqual(quote.last, 101.5)
+        self.assertEqual(quote.bid, 101.4)
+        self.assertEqual(quote.ask, 101.6)
+        self.assertEqual(quote.volume, 123456)
+
     def test_selected_yahoo_asset_is_enriched_with_isin(self) -> None:
         class TickerStub:
             info = {}

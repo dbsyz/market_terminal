@@ -43,6 +43,14 @@ class MarketSession:
     overnight_session: str = "Overnight availability not indicated"
 
 
+@dataclass(frozen=True)
+class QuoteSnapshot:
+    last: float | None = None
+    bid: float | None = None
+    ask: float | None = None
+    volume: float | None = None
+
+
 INTRADAY_MATRIX = (
     (
         "1D",
