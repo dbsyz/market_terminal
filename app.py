@@ -59,6 +59,8 @@ RUNTIME_SOURCE_FILES = ("app.py", "models.py", "providers.py", "run.py")
 DEFAULT_WINDOW_GEOMETRY = "1300x820"
 MIN_WINDOW_WIDTH = 1040
 MIN_WINDOW_HEIGHT = 650
+MIN_CHART_WINDOW_WIDTH = 620
+MIN_CHART_WINDOW_HEIGHT = 420
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,7 @@ class MarketTerminalApp(tk.Tk):
             value="Public/delayed market data via Yahoo Finance | Identifier mapping via OpenFIGI"
         )
         self.quote_var = tk.StringVar(value="Search for an asset to begin.")
+        self.fundamentals_var = tk.StringVar(value="")
         self.identity_var = tk.StringVar(value="")
         self.measurement_var = tk.StringVar(value="")
         self.session_var = tk.StringVar(value="")
@@ -140,6 +143,8 @@ class MarketTerminalApp(tk.Tk):
         self.text_selection_dragging = False
         self.text_selection_start: tuple[int, int] | None = None
         self.text_selection_borders: list[tk.Toplevel] = []
+        self.floating_window_drag: dict[str, int] | None = None
+        self.floating_window_resize: dict[str, int] | None = None
         self.geometry_save_after_id: str | None = None
         source_root = Path(__file__).resolve().parent
         self.source_watch_paths = tuple(source_root / name for name in RUNTIME_SOURCE_FILES)
@@ -266,18 +271,43 @@ class MarketTerminalApp(tk.Tk):
         ).pack(side=tk.LEFT, pady=(5, 0))
 
         self._build_update_banner()
-        self.search_panel = ttk.Frame(self, style="Panel.TFrame", padding=12)
-        self.search_panel.pack(fill=tk.X, padx=18, pady=(0, 10))
+        workspace = ttk.Frame(self, padding=(18, 0, 18, 0))
+        workspace.pack(fill=tk.BOTH, expand=True)
+        self.desktop = tk.Frame(workspace, bg=BG)
+        self.desktop.pack(fill=tk.BOTH, expand=True)
+        self.desktop.bind("<Configure>", self._constrain_chart_window_to_desktop)
+        self.chart_window = tk.Frame(
+            self.desktop,
+            bg=PANEL,
+            highlightbackground=GRID,
+            highlightthickness=1,
+        )
+        self.chart_window.place(x=0, y=0, width=960, height=560)
+        self.chart_titlebar = tk.Frame(self.chart_window, bg=GRID, height=28, cursor="fleur")
+        self.chart_titlebar.pack(fill=tk.X)
+        self.chart_titlebar.pack_propagate(False)
+        title_label = tk.Label(
+            self.chart_titlebar,
+            text="CHART",
+            bg=GRID,
+            fg=TEXT,
+            font=("Segoe UI", 9, "bold"),
+            padx=9,
+        )
+        title_label.pack(side=tk.LEFT)
+        title_label.bind("<ButtonPress-1>", self._start_chart_window_drag)
+        title_label.bind("<B1-Motion>", self._drag_chart_window)
+        title_label.bind("<ButtonRelease-1>", self._finish_chart_window_drag)
         self.search_entry = tk.Entry(
-            self.search_panel,
+            self.chart_titlebar,
             textvariable=self.search_var,
             bg=BG,
             fg=TEXT,
             insertbackground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 11),
+            font=("Segoe UI", 10),
         )
-        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=7, padx=(0, 8))
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4, padx=(6, 8), pady=3)
         self.search_entry.bind("<Return>", self._accept_or_search)
         self.search_entry.bind("<Control-a>", self._select_all_search_text)
         self.search_entry.bind("<Control-A>", self._select_all_search_text)
@@ -286,26 +316,122 @@ class MarketTerminalApp(tk.Tk):
         self.search_entry.bind("<Down>", lambda _event: self._move_suggestion_selection(1))
         self.search_entry.bind("<Up>", lambda _event: self._move_suggestion_selection(-1))
         self.search_entry.bind("<FocusIn>", lambda _event: self._set_suggestion_anchor(self.search_entry))
-        ttk.Label(
-            self.search_panel,
-            text="Ticker / company / ISIN / CUSIP / FIGI  |  Type, arrow, Enter",
-            style="Status.TLabel",
-        ).pack(side=tk.LEFT, padx=(10, 0))
-
-        workspace = ttk.Frame(self, padding=(18, 0, 18, 0))
-        workspace.pack(fill=tk.BOTH, expand=True)
-        self.chart_panel = ttk.Frame(workspace)
+        tk.Button(
+            self.chart_titlebar,
+            text="MAX",
+            command=self._maximize_chart_window,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        self.chart_titlebar.bind("<ButtonPress-1>", self._start_chart_window_drag)
+        self.chart_titlebar.bind("<B1-Motion>", self._drag_chart_window)
+        self.chart_titlebar.bind("<ButtonRelease-1>", self._finish_chart_window_drag)
+        self.chart_panel = ttk.Frame(self.chart_window, style="Panel.TFrame", padding=(8, 7, 8, 0))
         self.chart_panel.pack(fill=tk.BOTH, expand=True)
+        self.chart_resize_grip = tk.Frame(
+            self.chart_window,
+            bg=ORANGE,
+            width=15,
+            height=15,
+            cursor="size_nw_se",
+        )
+        self.chart_resize_grip.place(relx=1.0, rely=1.0, anchor=tk.SE)
+        self.chart_resize_grip.bind("<ButtonPress-1>", self._start_chart_window_resize)
+        self.chart_resize_grip.bind("<B1-Motion>", self._resize_chart_window)
+        self.chart_resize_grip.bind("<ButtonRelease-1>", self._finish_chart_window_resize)
+        self.after_idle(self._maximize_chart_window)
         ttk.Label(self.chart_panel, textvariable=self.identity_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 3)
         )
         ttk.Label(self.chart_panel, textvariable=self.quote_var, style="Quote.TLabel").pack(
             anchor=tk.W, pady=(0, 6)
         )
+        ttk.Label(self.chart_panel, textvariable=self.fundamentals_var, style="Status.TLabel").pack(
+            anchor=tk.W, pady=(0, 4)
+        )
         ttk.Label(self.chart_panel, textvariable=self.measurement_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 4)
         )
         self._build_suggestion_popup()
+
+    def _maximize_chart_window(self) -> None:
+        self.desktop.update_idletasks()
+        width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
+        height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
+        self.chart_window.place_configure(x=0, y=0, width=width, height=height)
+
+    def _start_chart_window_drag(self, event: tk.Event) -> str:
+        self.chart_window.lift()
+        self.floating_window_drag = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "left": self.chart_window.winfo_x(),
+            "top": self.chart_window.winfo_y(),
+        }
+        return "break"
+
+    def _drag_chart_window(self, event: tk.Event) -> str:
+        if not self.floating_window_drag:
+            return "break"
+        desktop_width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
+        width = self.chart_window.winfo_width()
+        height = self.chart_window.winfo_height()
+        left = self.floating_window_drag["left"] + event.x_root - self.floating_window_drag["x"]
+        top = self.floating_window_drag["top"] + event.y_root - self.floating_window_drag["y"]
+        left = max(0, min(left, max(desktop_width - width, 0)))
+        top = max(0, min(top, max(desktop_height - height, 0)))
+        self.chart_window.place_configure(x=left, y=top)
+        return "break"
+
+    def _finish_chart_window_drag(self, _event: tk.Event) -> str:
+        self.floating_window_drag = None
+        return "break"
+
+    def _start_chart_window_resize(self, event: tk.Event) -> str:
+        self.chart_window.lift()
+        self.floating_window_resize = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "width": self.chart_window.winfo_width(),
+            "height": self.chart_window.winfo_height(),
+        }
+        return "break"
+
+    def _resize_chart_window(self, event: tk.Event) -> str:
+        if not self.floating_window_resize:
+            return "break"
+        left = self.chart_window.winfo_x()
+        top = self.chart_window.winfo_y()
+        desktop_width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
+        width = self.floating_window_resize["width"] + event.x_root - self.floating_window_resize["x"]
+        height = self.floating_window_resize["height"] + event.y_root - self.floating_window_resize["y"]
+        width = max(MIN_CHART_WINDOW_WIDTH, min(width, max(desktop_width - left, MIN_CHART_WINDOW_WIDTH)))
+        height = max(MIN_CHART_WINDOW_HEIGHT, min(height, max(desktop_height - top, MIN_CHART_WINDOW_HEIGHT)))
+        self.chart_window.place_configure(width=width, height=height)
+        return "break"
+
+    def _finish_chart_window_resize(self, _event: tk.Event) -> str:
+        self.floating_window_resize = None
+        return "break"
+
+    def _constrain_chart_window_to_desktop(self, _event: tk.Event) -> None:
+        if not hasattr(self, "chart_window"):
+            return
+        desktop_width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
+        left = max(0, min(self.chart_window.winfo_x(), max(desktop_width - MIN_CHART_WINDOW_WIDTH, 0)))
+        top = max(0, min(self.chart_window.winfo_y(), max(desktop_height - MIN_CHART_WINDOW_HEIGHT, 0)))
+        width = min(max(self.chart_window.winfo_width(), MIN_CHART_WINDOW_WIDTH), desktop_width - left)
+        height = min(max(self.chart_window.winfo_height(), MIN_CHART_WINDOW_HEIGHT), desktop_height - top)
+        self.chart_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _build_update_banner(self) -> None:
         self.update_banner = tk.Frame(
@@ -353,7 +479,6 @@ class MarketTerminalApp(tk.Tk):
                 fill=tk.X,
                 padx=18,
                 pady=(0, 10),
-                before=self.search_panel,
             )
         self.after(SOURCE_WATCH_INTERVAL_MS, self._poll_for_source_update)
 
@@ -675,7 +800,25 @@ class MarketTerminalApp(tk.Tk):
             )
             self._begin_add_to_compare()
             return
+        self._keep_primary_series_only()
         self._hide_compare_panel()
+
+    def _keep_primary_series_only(self) -> None:
+        if len(self.chart_instruments) <= 1:
+            return
+        primary = self.chart_instruments[0]
+        self.chart_instruments = [primary]
+        self.selected_instrument = primary
+        self.current_frames = {
+            primary.symbol: self.current_frames[primary.symbol]
+        } if primary.symbol in self.current_frames else {}
+        self.current_frame = self.current_frames.get(primary.symbol, pd.DataFrame())
+        self.beta_model_stats = None
+        self.rebase_comparison_var.set(False)
+        self.betas_comparison_var.set(False)
+        self.display_mode_var.set("Prices")
+        self._update_series_tree()
+        self.status_var.set("Comparison series removed; primary asset remains open.")
 
     def _hide_compare_panel(self) -> str:
         self.compare_visible_var.set(False)
@@ -739,15 +882,17 @@ class MarketTerminalApp(tk.Tk):
         self.canvas.mpl_connect("motion_notify_event", self._on_chart_hover)
         self.canvas.mpl_connect("axes_leave_event", self._hide_hover)
         self._clear_chart("Enter a security name or identifier above.")
-        ttk.Label(self, textvariable=self.status_var, style="Status.TLabel", padding=(18, 9)).pack(
+        ttk.Label(
+            self.chart_panel, textvariable=self.status_var, style="Status.TLabel", padding=(0, 7)
+        ).pack(
             fill=tk.X
         )
-        ttk.Label(self, textvariable=self.session_var, style="Status.TLabel", padding=(18, 0)).pack(
-            fill=tk.X
-        )
-        ttk.Label(self, textvariable=self.hours_var, style="Status.TLabel", padding=(18, 7)).pack(
-            fill=tk.X
-        )
+        ttk.Label(
+            self.chart_panel, textvariable=self.session_var, style="Status.TLabel", padding=(0, 0)
+        ).pack(fill=tk.X)
+        ttk.Label(
+            self.chart_panel, textvariable=self.hours_var, style="Status.TLabel", padding=(0, 5)
+        ).pack(fill=tk.X)
 
     def _build_chart_toolbar(self) -> None:
         self.chart_toolbar = tk.Frame(
@@ -1359,6 +1504,9 @@ class MarketTerminalApp(tk.Tk):
             return
         self._hide_suggestions()
         self.chart_instruments.append(instrument)
+        if len(self.chart_instruments) >= 2 and not self.betas_comparison_var.get():
+            self.rebase_comparison_var.set(True)
+            self.display_mode_var.set("Rebased 100")
         self._update_series_tree()
         if self.compare_visible_var.get():
             self.add_to_compare_mode = True
@@ -1373,6 +1521,9 @@ class MarketTerminalApp(tk.Tk):
     def _open_instrument(self, instrument: Instrument) -> None:
         self.chart_instruments = [instrument]
         self.selected_instrument = instrument
+        self.rebase_comparison_var.set(False)
+        self.betas_comparison_var.set(False)
+        self.display_mode_var.set("Prices")
         self._update_series_tree()
         self.refresh_chart()
 
@@ -1458,6 +1609,7 @@ class MarketTerminalApp(tk.Tk):
         self._clear_chart("Search for an asset, then choose Open or Add.")
         self.identity_var.set("")
         self.quote_var.set("Search for an asset to begin.")
+        self.fundamentals_var.set("")
         self.session_var.set("")
         self.hours_var.set("")
         self.status_var.set("Chart series cleared.")
@@ -1570,6 +1722,7 @@ class MarketTerminalApp(tk.Tk):
             f"{change:+,.4f} ({pct:+.2f}%)   [{range_spec.label}]"
             f" | {len(instruments)} series | {view_label}"
         )
+        self.fundamentals_var.set(instrument_fundamentals_text(primary))
         ylabel = "Indexed (100)" if self.display_mode_var.get() == "Rebased 100" else "Price"
         self.price_axis.set_ylabel(ylabel, color=MUTED)
         self._draw_lower_panel(frame, primary.symbol)
@@ -1599,7 +1752,39 @@ class MarketTerminalApp(tk.Tk):
         )
 
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
-        if "Volume" in frame.columns:
+        if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):
+            buys = frame["BuyCashEUR"].fillna(0)
+            sells = frame["SellCashEUR"].fillna(0)
+            width = _bar_width(frame)
+            self.volume_axis.axhline(0, color=GRID, linewidth=0.8)
+            self.volume_axis.bar(
+                frame.index,
+                buys,
+                color=UP,
+                alpha=0.58 if self.technical_study else 0.72,
+                width=width,
+                label="Buys",
+            )
+            self.volume_axis.bar(
+                frame.index,
+                -sells,
+                color=DOWN,
+                alpha=0.58 if self.technical_study else 0.72,
+                width=width,
+                label="Sells",
+            )
+            if buys.any() or sells.any():
+                self.volume_axis.legend(
+                    loc="upper left",
+                    facecolor=PANEL,
+                    edgecolor=GRID,
+                    labelcolor=TEXT,
+                    fontsize=8,
+                )
+                self._label_trade_cash_bars(buys, sells)
+            self.volume_axis.set_ylabel(f"Trades {symbol}", color=MUTED)
+            self.volume_axis.yaxis.set_major_formatter(_euro_cash_formatter())
+        elif "Volume" in frame.columns:
             self.volume_axis.bar(
                 frame.index,
                 frame["Volume"].fillna(0),
@@ -1607,8 +1792,8 @@ class MarketTerminalApp(tk.Tk):
                 alpha=0.38 if self.technical_study else 0.5,
                 width=_bar_width(frame),
             )
-        self.volume_axis.set_ylabel(f"Vol {symbol}", color=MUTED)
-        self.volume_axis.yaxis.set_major_formatter(_volume_formatter())
+            self.volume_axis.set_ylabel(f"Vol {symbol}", color=MUTED)
+            self.volume_axis.yaxis.set_major_formatter(_volume_formatter())
         self.study_axis.set_visible(bool(self.technical_study))
         if not self.technical_study:
             return
@@ -1640,6 +1825,34 @@ class MarketTerminalApp(tk.Tk):
                 ha="center",
                 va="center",
                 fontsize=9,
+            )
+
+    def _label_trade_cash_bars(self, buys: pd.Series, sells: pd.Series) -> None:
+        maximum = max(float(buys.max() or 0), float(sells.max() or 0))
+        if maximum <= 0:
+            return
+        offset = maximum * 0.035
+        for timestamp, value in buys[buys > 0].items():
+            self.volume_axis.text(
+                timestamp,
+                float(value) + offset,
+                format_euro_cash_value(float(value), compact=True),
+                color=TEXT,
+                fontsize=7,
+                ha="center",
+                va="bottom",
+                rotation=90,
+            )
+        for timestamp, value in sells[sells > 0].items():
+            self.volume_axis.text(
+                timestamp,
+                -float(value) - offset,
+                format_euro_cash_value(float(value), compact=True),
+                color=TEXT,
+                fontsize=7,
+                ha="center",
+                va="top",
+                rotation=90,
             )
 
     def _redraw_current_chart(self) -> None:
@@ -1691,6 +1904,14 @@ class MarketTerminalApp(tk.Tk):
 
     def _on_chart_hover(self, event) -> None:
         if (
+            event.inaxes == self.volume_axis
+            and event.xdata is not None
+            and not self.current_frame.empty
+            and not self.measurement_mode
+        ):
+            self._draw_volume_hover(event.xdata)
+            return
+        if (
             event.inaxes != self.price_axis
             or event.xdata is None
             or not self.current_frames
@@ -1725,6 +1946,57 @@ class MarketTerminalApp(tk.Tk):
             "\n".join(lines),
             xy=(timestamp, anchor_value),
             xytext=(12, 15),
+            textcoords="offset points",
+            color=TEXT,
+            fontsize=9,
+            bbox={"boxstyle": "round,pad=0.4", "facecolor": PANEL, "edgecolor": GRID},
+            zorder=8,
+        )
+        self.hover_artists.append(tooltip)
+        self.canvas.draw_idle()
+
+    def _draw_volume_hover(self, x_position: float) -> None:
+        self._clear_hover()
+        position = _nearest_series_position(self.current_frame["Close"], x_position)
+        timestamp = self.current_frame.index[position]
+        guide = self.volume_axis.axvline(timestamp, color=MUTED, linewidth=0.8, linestyle="--")
+        self.hover_artists.append(guide)
+        label = self._format_chart_time(timestamp)
+        symbol = self.selected_instrument.symbol if self.selected_instrument else ""
+        if {"BuyCashEUR", "SellCashEUR"}.issubset(self.current_frame.columns):
+            buy_cash = float(self.current_frame["BuyCashEUR"].iloc[position])
+            sell_cash = float(self.current_frame["SellCashEUR"].iloc[position])
+            y_anchor = buy_cash if buy_cash >= sell_cash else -sell_cash
+            marker_value = y_anchor
+            lines = [
+                label,
+                f"{symbol} trades",
+                f"Buys: {format_euro_cash_value(buy_cash)}",
+                f"Sells: {format_euro_cash_value(sell_cash)}",
+                f"Net: {format_euro_cash_value(sell_cash - buy_cash)}",
+            ]
+            marker_color = UP if marker_value >= 0 else DOWN
+        elif "Volume" in self.current_frame.columns:
+            volume = float(self.current_frame["Volume"].iloc[position])
+            y_anchor = volume
+            marker_value = volume
+            lines = [label, f"{symbol} volume: {format_volume_value(volume)}"]
+            marker_color = SERIES_COLORS[0]
+        else:
+            return
+        marker = self.volume_axis.scatter(
+            [timestamp],
+            [marker_value],
+            color=marker_color,
+            s=30,
+            edgecolors=BG,
+            zorder=7,
+        )
+        self.hover_artists.append(marker)
+        tooltip = self.volume_axis.annotate(
+            "\n".join(lines),
+            xy=(timestamp, y_anchor),
+            xytext=(12, 12),
             textcoords="offset points",
             color=TEXT,
             fontsize=9,
@@ -1809,7 +2081,15 @@ class MarketTerminalApp(tk.Tk):
         if "Volume" not in self.current_frame.columns:
             return
         dates = mdates.date2num(self.current_frame.index.to_pydatetime())
-        visible = self.current_frame.loc[(dates >= x_min) & (dates <= x_max), "Volume"]
+        visible_frame = self.current_frame.loc[(dates >= x_min) & (dates <= x_max)]
+        if {"BuyCashEUR", "SellCashEUR"}.issubset(visible_frame.columns):
+            buy_max = float(visible_frame["BuyCashEUR"].max()) if not visible_frame.empty else 0.0
+            sell_max = float(visible_frame["SellCashEUR"].max()) if not visible_frame.empty else 0.0
+            maximum = max(buy_max, sell_max)
+            if maximum > 0:
+                self.volume_axis.set_ylim(-maximum * 1.12, maximum * 1.12)
+            return
+        visible = visible_frame["Volume"]
         maximum = float(visible.max()) if not visible.empty else 0.0
         if maximum > 0:
             self.volume_axis.set_ylim(0, maximum * 1.08)
@@ -2291,13 +2571,39 @@ def instrument_identity_text(instrument: Instrument) -> str:
     return f"ISIN: {isin}  |  Asset Type: {asset_type}"
 
 
+def instrument_fundamentals_text(instrument: Instrument) -> str:
+    quote_type = instrument.quote_type.upper()
+    if quote_type == "PORTFOLIO INDEX":
+        return f"Portfolio Value: {format_currency_size(instrument.aum or instrument.market_cap)} EUR"
+    if quote_type in {"ETF", "MUTUALFUND", "FUND"}:
+        return (
+            f"Market Cap: {format_currency_size(instrument.market_cap)}"
+            f"  |  AUM: {format_currency_size(instrument.aum)}"
+        )
+    if quote_type in {"EQUITY", "STOCK"}:
+        return f"Market Cap: {format_currency_size(instrument.market_cap)}"
+    if instrument.market_cap is not None:
+        return f"Market Cap: {format_currency_size(instrument.market_cap)}"
+    return ""
+
+
 def format_market_cap(market_cap: float | None) -> str:
     if market_cap is None:
         return ""
+    return format_compact_number(market_cap)
+
+
+def format_currency_size(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return format_compact_number(value)
+
+
+def format_compact_number(value: float) -> str:
     for size, suffix in ((1_000_000_000_000, "T"), (1_000_000_000, "B"), (1_000_000, "M")):
-        if market_cap >= size:
-            return f"{market_cap / size:.1f}{suffix}"
-    return f"{market_cap:,.0f}"
+        if abs(value) >= size:
+            return f"{value / size:.1f}{suffix}"
+    return f"{value:,.0f}"
 
 
 def fit_popup_to_window(
@@ -2336,7 +2642,11 @@ def chart_date_bounds(frame: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
 def prepare_comparison_frames(
     frames: dict[str, pd.DataFrame], range_spec: RangeSpec
 ) -> dict[str, pd.DataFrame]:
-    visible = {symbol: frame for symbol, frame in frames.items() if not frame.empty}
+    visible = {
+        symbol: normalize_chart_frame_index(frame)
+        for symbol, frame in frames.items()
+        if not frame.empty
+    }
     if range_spec.period != "max" or len(visible) < 2:
         return visible
     shared_start = max(frame.index[0] for frame in visible.values())
@@ -2345,6 +2655,18 @@ def prepare_comparison_frames(
         for symbol, frame in visible.items()
         if not frame.loc[frame.index >= shared_start].empty
     }
+
+
+def normalize_chart_frame_index(frame: pd.DataFrame) -> pd.DataFrame:
+    index = pd.to_datetime(frame.index)
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_localize(None)
+    if len(index) and all(timestamp.time() == datetime.min.time() for timestamp in index):
+        index = index.normalize()
+    result = frame.copy()
+    result.index = index
+    result.attrs.update(frame.attrs)
+    return result
 
 
 def displayed_close_series(
@@ -2540,16 +2862,34 @@ def _display_data_source(frame: pd.DataFrame) -> str:
 def _volume_formatter():
     from matplotlib.ticker import FuncFormatter
 
-    def format_volume(value: float, _position: int) -> str:
-        if value >= 1_000_000_000:
-            return f"{value / 1_000_000_000:.1f}B"
-        if value >= 1_000_000:
-            return f"{value / 1_000_000:.1f}M"
-        if value >= 1_000:
-            return f"{value / 1_000:.0f}K"
-        return f"{value:.0f}"
+    return FuncFormatter(lambda value, _position: format_volume_value(value))
 
-    return FuncFormatter(format_volume)
+
+def format_volume_value(value: float) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.0f}K"
+    return f"{value:.0f}"
+
+
+def _euro_cash_formatter():
+    from matplotlib.ticker import FuncFormatter
+
+    return FuncFormatter(lambda value, _position: format_euro_cash_value(value))
+
+
+def format_euro_cash_value(value: float, compact: bool = False) -> str:
+    sign = "-" if value < 0 else ""
+    absolute = abs(value)
+    if absolute >= 1_000_000:
+        return f"{sign}EUR {absolute / 1_000_000:.1f}M"
+    if absolute >= 1_000:
+        decimals = 1 if compact and absolute < 10_000 else 0
+        return f"{sign}EUR {absolute / 1_000:.{decimals}f}K"
+    return f"{sign}EUR {absolute:.0f}"
 
 
 def _technical_formatter():

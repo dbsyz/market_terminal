@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from market_terminal.models import HISTORICAL_RANGES, INTRADAY_RANGES, Instrument, RangeSpec
-from market_terminal.portfolio_index import build_portfolio_monitor_report
+from market_terminal.portfolio_index import _first_trade_date, build_portfolio_monitor_report, portfolio_index_files
 from market_terminal.providers import (
     MarketDataProvider,
     OpenFigiClient,
@@ -203,29 +203,82 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(instruments[0].source, "Yahoo Finance + OpenFIGI")
 
     def test_searches_local_fort_pnl_portfolio_index(self) -> None:
-        provider = MarketDataProvider.__new__(MarketDataProvider)
-
-        instruments = provider.search("FORT_PNL")
-
-        self.assertEqual(instruments[0].symbol, "FORT_PNL")
-        self.assertEqual(instruments[0].quote_type, "Portfolio Index")
-        self.assertEqual(instruments[0].currency, "EUR")
-
-    def test_loads_local_fort_pnl_index_levels_as_history(self) -> None:
         with temporary_portfolio_index_dir() as out_dir:
             original = os.environ.get("FORT_PNL_OUT_DIR")
             os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
             try:
                 provider = MarketDataProvider.__new__(MarketDataProvider)
-                frame = provider.history(Instrument("FORT_PNL", "FORT PNL"), HISTORICAL_RANGES[0])
+                instruments = provider.search("FORT_PNL")
             finally:
                 if original is None:
                     os.environ.pop("FORT_PNL_OUT_DIR", None)
                 else:
                     os.environ["FORT_PNL_OUT_DIR"] = original
 
+        self.assertEqual(instruments[0].symbol, "FORT_PNL")
+        self.assertEqual(instruments[0].quote_type, "Portfolio Index")
+        self.assertEqual(instruments[0].exchange, "USER OWNED")
+        self.assertEqual(instruments[0].currency, "EUR")
+        self.assertEqual(instruments[0].market_cap, 1666.67)
+        self.assertEqual(instruments[0].aum, 1666.67)
+
+    def test_loads_local_fort_pnl_index_levels_as_history(self) -> None:
+        with temporary_portfolio_index_dir() as out_dir:
+            original = os.environ.get("FORT_PNL_OUT_DIR")
+            original_disable = os.environ.get("FORT_PNL_DISABLE_SYNTHETIC_HISTORY")
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            os.environ["FORT_PNL_DISABLE_SYNTHETIC_HISTORY"] = "1"
+            try:
+                provider = MarketDataProvider.__new__(MarketDataProvider)
+                frame = provider.history(Instrument("FORT_PNL", "FORT PNL"), HISTORICAL_RANGES[-1])
+            finally:
+                if original is None:
+                    os.environ.pop("FORT_PNL_OUT_DIR", None)
+                else:
+                    os.environ["FORT_PNL_OUT_DIR"] = original
+                if original_disable is None:
+                    os.environ.pop("FORT_PNL_DISABLE_SYNTHETIC_HISTORY", None)
+                else:
+                    os.environ["FORT_PNL_DISABLE_SYNTHETIC_HISTORY"] = original_disable
+
         self.assertEqual(list(frame["Close"]), [100.0, 123.5])
         self.assertEqual(frame.attrs["data_source"], "FORT_PNL local index levels")
+
+    def test_local_fort_pnl_index_respects_selected_short_range(self) -> None:
+        with temporary_portfolio_index_dir() as out_dir:
+            original = os.environ.get("FORT_PNL_OUT_DIR")
+            original_disable = os.environ.get("FORT_PNL_DISABLE_SYNTHETIC_HISTORY")
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            os.environ["FORT_PNL_DISABLE_SYNTHETIC_HISTORY"] = "1"
+            try:
+                provider = MarketDataProvider.__new__(MarketDataProvider)
+                frame = provider.history(Instrument("FORT_PNL", "FORT PNL"), INTRADAY_RANGES[0])
+            finally:
+                if original is None:
+                    os.environ.pop("FORT_PNL_OUT_DIR", None)
+                else:
+                    os.environ["FORT_PNL_OUT_DIR"] = original
+                if original_disable is None:
+                    os.environ.pop("FORT_PNL_DISABLE_SYNTHETIC_HISTORY", None)
+                else:
+                    os.environ["FORT_PNL_DISABLE_SYNTHETIC_HISTORY"] = original_disable
+
+        self.assertEqual(len(frame), 1)
+        self.assertEqual(float(frame["Close"].iloc[-1]), 123.5)
+
+    def test_local_fort_pnl_inception_date_comes_from_first_trade(self) -> None:
+        with temporary_portfolio_index_dir() as out_dir:
+            original = os.environ.get("FORT_PNL_OUT_DIR")
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            try:
+                inception = _first_trade_date(portfolio_index_files())
+            finally:
+                if original is None:
+                    os.environ.pop("FORT_PNL_OUT_DIR", None)
+                else:
+                    os.environ["FORT_PNL_OUT_DIR"] = original
+
+        self.assertEqual(inception, pd.Timestamp("2025-02-10"))
 
     def test_builds_trade_aware_portfolio_monitor_report(self) -> None:
         with temporary_portfolio_index_dir() as out_dir:
@@ -270,6 +323,8 @@ class MarketDataProviderTests(unittest.TestCase):
 
     def test_selected_yahoo_asset_is_enriched_with_isin(self) -> None:
         class TickerStub:
+            info = {}
+
             def get_isin(self):
                 return "LU1900066975"
 
@@ -284,6 +339,29 @@ class MarketDataProviderTests(unittest.TestCase):
             providers.yf.Ticker = original_ticker
 
         self.assertEqual(enriched.isin, "LU1900066975")
+
+    def test_selected_yahoo_asset_is_enriched_with_market_cap_and_aum(self) -> None:
+        class TickerStub:
+            info = {"marketCap": 123_000_000_000, "totalAssets": 456_000_000_000}
+
+            def get_isin(self):
+                return "-"
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        original_lookup = providers._lookup_isin_by_euronext_listing
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        providers._lookup_isin_by_euronext_listing = lambda _symbol: ""
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            enriched = provider.instrument_details(Instrument("SPY", "SPDR", quote_type="ETF"))
+        finally:
+            providers.yf.Ticker = original_ticker
+            providers._lookup_isin_by_euronext_listing = original_lookup
+
+        self.assertEqual(enriched.market_cap, 123_000_000_000)
+        self.assertEqual(enriched.aum, 456_000_000_000)
 
     def test_euronext_listing_uses_official_search_isin_fallback(self) -> None:
         class TickerStub:
@@ -551,6 +629,16 @@ def temporary_portfolio_index_dir():
                     "trade_date,trade_time,action,isin,ticker,name,currency,quantity_signed,trade_price,commission_eur,net_trade_cash_eur,realized_pnl_eur,position_after_qty,broker_reference",
                     "2026-01-05,09:00:00,BUY,AAA,AAA,Alpha,EUR,10,8,1,-81,0,10,BUY1",
                     "2026-02-05,09:00:00,SELL,BBB,BBB,Beta,USD,-5,9,1,44,-25,5,SELL1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (out_dir / "fort_pnl_trade_table.csv").write_text(
+            "\n".join(
+                [
+                    "trade_date,trade_time,equity_ticker,side,trade_quantity",
+                    "10-02-2025,11:43:56,AAA,Achat - Exécution unique,10",
+                    "05-01-2026,09:00:00,BBB,Achat - Exécution unique,5",
                 ]
             ),
             encoding="utf-8",

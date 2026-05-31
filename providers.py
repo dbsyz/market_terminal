@@ -344,17 +344,30 @@ class MarketDataProvider:
         return _unique_instruments(instruments)
 
     def instrument_details(self, instrument: Instrument) -> Instrument:
+        market_cap = instrument.market_cap
+        aum = instrument.aum
+        try:
+            info = yf.Ticker(instrument.symbol).info or {}
+        except Exception:
+            info = {}
+        if market_cap is None:
+            market_cap = _as_optional_float(info.get("marketCap"))
+        if aum is None:
+            aum = _as_optional_float(
+                info.get("totalAssets")
+                or info.get("totalNetAssets")
+                or info.get("netAssets")
+                or info.get("fundTotalAssets")
+            )
         if instrument.isin:
-            return instrument
+            return replace(instrument, market_cap=market_cap, aum=aum)
         try:
             isin = str(yf.Ticker(instrument.symbol).get_isin() or "").strip()
         except Exception:
             isin = ""
         if not isin or isin == "-":
             isin = _lookup_isin_by_euronext_listing(instrument.symbol)
-        if not isin:
-            return instrument
-        return replace(instrument, isin=isin)
+        return replace(instrument, isin=isin, market_cap=market_cap, aum=aum)
 
     def _search_yahoo(self, query: str) -> list[Instrument]:
         search = yf.Search(
@@ -388,6 +401,11 @@ class MarketDataProvider:
                     quote_type=str(quote.get("quoteType", "")).strip(),
                     currency=str(quote.get("currency", "")).strip(),
                     market_cap=_as_optional_float(quote.get("marketCap")),
+                    aum=_as_optional_float(
+                        quote.get("totalAssets")
+                        or quote.get("totalNetAssets")
+                        or quote.get("netAssets")
+                    ),
                 )
             )
         return _unique_instruments(instruments)

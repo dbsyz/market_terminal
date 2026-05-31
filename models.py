@@ -13,6 +13,7 @@ class Instrument:
     source: str = "Yahoo Finance"
     figi: str = ""
     market_cap: float | None = None
+    aum: float | None = None
     isin: str = ""
 
     @property

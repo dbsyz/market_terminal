@@ -21,6 +21,7 @@ from market_terminal.app import (
     fit_popup_to_window,
     format_market_cap,
     format_probability,
+    instrument_fundamentals_text,
     instrument_identity_text,
     nearest_displayed_values,
     load_window_geometry,
@@ -154,6 +155,41 @@ class InstrumentIdentityTests(unittest.TestCase):
             "ISIN: N/A  |  Asset Type: Equity",
         )
 
+    def test_formats_equity_market_cap_for_header(self) -> None:
+        self.assertEqual(
+            instrument_fundamentals_text(
+                Instrument("AAPL", "Apple", quote_type="Equity", market_cap=3_100_000_000_000)
+            ),
+            "Market Cap: 3.1T",
+        )
+
+    def test_formats_etf_market_cap_and_aum_for_header(self) -> None:
+        self.assertEqual(
+            instrument_fundamentals_text(
+                Instrument(
+                    "SPY",
+                    "SPDR S&P 500 ETF",
+                    quote_type="ETF",
+                    market_cap=620_000_000_000,
+                    aum=650_000_000_000,
+                )
+            ),
+            "Market Cap: 620.0B  |  AUM: 650.0B",
+        )
+
+    def test_formats_portfolio_index_value_for_header(self) -> None:
+        self.assertEqual(
+            instrument_fundamentals_text(
+                Instrument(
+                    "FORT_PNL",
+                    "FORT_PNL custom portfolio index",
+                    quote_type="Portfolio Index",
+                    aum=143_221.33,
+                )
+            ),
+            "Portfolio Value: 143,221 EUR",
+        )
+
 
 class TextSelectionTests(unittest.TestCase):
     def test_normalizes_drag_direction_and_detects_overlapping_text(self) -> None:
@@ -267,6 +303,26 @@ class ComparisonSeriesTests(unittest.TestCase):
 
         self.assertEqual(start, pd.Timestamp("2020-01-01"))
         self.assertEqual(end, pd.Timestamp("2026-01-01"))
+
+    def test_comparison_frames_normalize_mixed_timezones(self) -> None:
+        local = pd.DataFrame(
+            {"Close": [100.0, 101.0]},
+            index=pd.to_datetime(["2026-01-02", "2026-01-05"]),
+        )
+        yahoo = pd.DataFrame(
+            {"Close": [200.0, 201.0]},
+            index=pd.to_datetime(["2026-01-02", "2026-01-05"]).tz_localize("America/New_York"),
+        )
+
+        frames = prepare_comparison_frames(
+            {"FORT_PNL": local, "SPY": yahoo},
+            HISTORICAL_RANGES[2],
+        )
+        start, end = comparison_date_bounds(frames)
+
+        self.assertEqual(start, pd.Timestamp("2026-01-02"))
+        self.assertEqual(end, pd.Timestamp("2026-01-05"))
+
 
     def test_price_bounds_focus_on_intraday_trading_range(self) -> None:
         closes = pd.Series([308.0, 309.0, 308.5])
