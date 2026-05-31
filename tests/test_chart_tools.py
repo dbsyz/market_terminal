@@ -22,19 +22,24 @@ from market_terminal.app import (
     format_market_cap,
     format_probability,
     instrument_fundamentals_text,
+    instrument_from_watchlist_row,
     instrument_identity_text,
     nearest_displayed_values,
     load_window_geometry,
     load_window_state,
+    load_layout_state,
     normalized_rectangle,
     ordered_text_blocks,
     prepare_comparison_frames,
     rectangle_is_drag,
     rectangles_intersect,
     save_window_geometry,
+    save_watchlist_state,
+    save_layout_state,
     source_file_snapshot,
     technical_indicator,
     technical_study_label,
+    watchlist_row_from_instrument,
 )
 from market_terminal.models import HISTORICAL_RANGES, INTRADAY_MATRIX, Instrument
 
@@ -189,6 +194,44 @@ class InstrumentIdentityTests(unittest.TestCase):
             ),
             "Portfolio Value: 143,221 EUR",
         )
+
+    def test_round_trips_watchlist_instrument_state(self) -> None:
+        instrument = Instrument(
+            "SPY",
+            "SPDR S&P 500 ETF",
+            exchange="NYSEArca",
+            quote_type="ETF",
+            currency="USD",
+            market_cap=1_000_000,
+            aum=2_000_000,
+            isin="US78462F1030",
+        )
+
+        restored = instrument_from_watchlist_row(watchlist_row_from_instrument(instrument))
+
+        self.assertEqual(restored, instrument)
+
+    def test_saves_and_loads_watchlist_state_file(self) -> None:
+        from market_terminal.app import load_watchlist_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "watchlist.json"
+
+            save_watchlist_state(path, [{"symbol": "AAPL"}, {}])
+
+            self.assertEqual(load_watchlist_state(path), [{"symbol": "AAPL"}, {}])
+
+    def test_saves_and_loads_layout_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.json"
+            layout = {
+                "watchlist": {"x": 0, "y": 10, "width": 420, "height": 500},
+                "chart": {"x": 430, "y": 10, "width": 900, "height": 650},
+            }
+
+            save_layout_state(path, layout)
+
+            self.assertEqual(load_layout_state(path), layout)
 
 
 class TextSelectionTests(unittest.TestCase):

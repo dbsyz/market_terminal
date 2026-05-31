@@ -32,7 +32,7 @@ from .models import (
 from .providers import MarketDataProvider
 
 
-BG = "#10161d"
+BG = "#000000"
 PANEL = "#17212b"
 GRID = "#30404d"
 ORANGE = "#f6a400"
@@ -90,7 +90,12 @@ class MarketTerminalApp(tk.Tk):
         self.configure(bg=BG)
         state_root = Path(__file__).resolve().parent / "out"
         self.window_state_path = state_root / "window_state.json"
+        self.layout_state_path = state_root / "layout.json"
+        self.watchlist_state_path = state_root / "watchlist.json"
         self.saved_window_state = load_window_state(self.window_state_path)
+        self.saved_layout_state = load_layout_state(self.layout_state_path)
+        self.startup_layout_state = json.loads(json.dumps(self.saved_layout_state))
+        self.saved_watchlist_state = load_watchlist_state(self.watchlist_state_path)
         self.geometry(self.saved_window_state["geometry"])
 
         self.search_var = tk.StringVar(value="")
@@ -116,6 +121,8 @@ class MarketTerminalApp(tk.Tk):
         self.intraday_custom_bar_var = tk.StringVar(value="15m")
         self.historical_start_var = tk.StringVar(value="")
         self.historical_end_var = tk.StringVar(value="")
+        self.chart_group_var = tk.StringVar(value="A")
+        self.watchlist_group_var = tk.StringVar(value="A")
         self.search_action_var = tk.StringVar(value="OPEN SECURITY")
         self.search_sort_var = tk.StringVar(value="Relevance")
         self.exchange_filter_var = tk.StringVar(value="All Markets")
@@ -149,6 +156,8 @@ class MarketTerminalApp(tk.Tk):
         self.text_selection_borders: list[tk.Toplevel] = []
         self.floating_window_drag: dict[str, int] | None = None
         self.floating_window_resize: dict[str, int] | None = None
+        self.layout_save_after_id: str | None = None
+        self.layout_manually_saved = False
         self.geometry_save_after_id: str | None = None
         source_root = Path(__file__).resolve().parent
         self.source_watch_paths = tuple(source_root / name for name in RUNTIME_SOURCE_FILES)
@@ -274,6 +283,12 @@ class MarketTerminalApp(tk.Tk):
         ttk.Label(
             header, text="  market chart workspace", style="Status.TLabel"
         ).pack(side=tk.LEFT, pady=(5, 0))
+        ttk.Button(
+            header,
+            text="SAVE LAYOUT",
+            style="Chip.TButton",
+            command=self._manual_save_function_layout,
+        ).pack(side=tk.RIGHT, pady=(2, 0))
 
         self._build_update_banner()
         workspace = ttk.Frame(self, padding=(18, 0, 18, 0))
@@ -303,6 +318,11 @@ class MarketTerminalApp(tk.Tk):
         title_label.bind("<ButtonPress-1>", self._start_chart_window_drag)
         title_label.bind("<B1-Motion>", self._drag_chart_window)
         title_label.bind("<ButtonRelease-1>", self._finish_chart_window_drag)
+        self._build_group_selector(
+            self.chart_titlebar,
+            self.chart_group_var,
+            self._on_chart_group_changed,
+        )
         self.search_entry = tk.Entry(
             self.chart_titlebar,
             textvariable=self.search_var,
@@ -365,26 +385,96 @@ class MarketTerminalApp(tk.Tk):
         self._build_suggestion_popup()
         self._build_watchlist_window()
         self.after_idle(self._layout_initial_workspace_windows)
+        self.after_idle(self.refresh_watchlist)
 
     def _layout_initial_workspace_windows(self) -> None:
         self.desktop.update_idletasks()
+        if self.desktop.winfo_width() < MIN_CHART_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_CHART_WINDOW_HEIGHT:
+            self.after(80, self._layout_initial_workspace_windows)
+            return
+        if self._restore_saved_function_layout():
+            return
         width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH + 360)
         height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
         watch_width = min(430, max(360, int(width * 0.32)))
         chart_width = max(MIN_CHART_WINDOW_WIDTH, width - watch_width - 10)
-        self.chart_window.place_configure(x=0, y=0, width=chart_width, height=height)
         self.watchlist_window.place_configure(
-            x=chart_width + 10,
+            x=0,
             y=0,
             width=watch_width,
             height=min(height, 520),
         )
+        self.chart_window.place_configure(x=watch_width + 10, y=0, width=chart_width, height=height)
+
+    def _restore_saved_function_layout(self) -> bool:
+        if not self.saved_layout_state:
+            return False
+        restored = False
+        for name, widget, minimum_width, minimum_height in (
+            ("watchlist", self.watchlist_window, 360, 260),
+            ("chart", self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT),
+        ):
+            geometry = self.saved_layout_state.get(name)
+            if not isinstance(geometry, dict):
+                continue
+            x = int(geometry.get("x", 0))
+            y = int(geometry.get("y", 0))
+            width = max(int(geometry.get("width", minimum_width)), minimum_width)
+            height = max(int(geometry.get("height", minimum_height)), minimum_height)
+            widget.place_configure(x=x, y=y, width=width, height=height)
+            restored = True
+        self._constrain_chart_window_to_desktop(None)
+        self._constrain_watchlist_window_to_desktop()
+        self.after(250, self._apply_saved_function_layout_without_constraints)
+        return restored
+
+    def _apply_saved_function_layout_without_constraints(self) -> None:
+        for name, widget in (
+            ("watchlist", self.watchlist_window),
+            ("chart", self.chart_window),
+        ):
+            geometry = self.saved_layout_state.get(name)
+            if not isinstance(geometry, dict):
+                continue
+            widget.place_configure(
+                x=int(geometry.get("x", widget.winfo_x())),
+                y=int(geometry.get("y", widget.winfo_y())),
+                width=int(geometry.get("width", widget.winfo_width())),
+                height=int(geometry.get("height", widget.winfo_height())),
+            )
+
+    def _build_group_selector(
+        self, parent: tk.Widget, variable: tk.StringVar, command
+    ) -> tk.OptionMenu:
+        menu = tk.OptionMenu(parent, variable, *tuple("ABCDEF"), command=command)
+        menu.configure(
+            bg=ORANGE,
+            fg=BG,
+            activebackground="#ffc247",
+            activeforeground=BG,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=2,
+            pady=0,
+            width=1,
+            highlightthickness=0,
+        )
+        menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
+        menu.pack(side=tk.LEFT, padx=(2, 4), pady=3)
+        return menu
+
+    def _on_chart_group_changed(self, _value: str | None = None) -> None:
+        self.status_var.set(f"Chart linked to group {self.chart_group_var.get()}.")
+
+    def _on_watchlist_group_changed(self, _value: str | None = None) -> None:
+        self.status_var.set(f"Watchlist linked to group {self.watchlist_group_var.get()}.")
 
     def _maximize_chart_window(self) -> None:
         self.desktop.update_idletasks()
         width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
         height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
         self.chart_window.place_configure(x=0, y=0, width=width, height=height)
+        self._save_function_layout()
 
     def _start_chart_window_drag(self, event: tk.Event) -> str:
         self.chart_window.lift()
@@ -408,10 +498,12 @@ class MarketTerminalApp(tk.Tk):
         left = max(0, min(left, max(desktop_width - width, 0)))
         top = max(0, min(top, max(desktop_height - height, 0)))
         self.chart_window.place_configure(x=left, y=top)
+        self._save_function_layout()
         return "break"
 
     def _finish_chart_window_drag(self, _event: tk.Event) -> str:
         self.floating_window_drag = None
+        self._save_function_layout()
         return "break"
 
     def _start_chart_window_resize(self, event: tk.Event) -> str:
@@ -436,14 +528,18 @@ class MarketTerminalApp(tk.Tk):
         width = max(MIN_CHART_WINDOW_WIDTH, min(width, max(desktop_width - left, MIN_CHART_WINDOW_WIDTH)))
         height = max(MIN_CHART_WINDOW_HEIGHT, min(height, max(desktop_height - top, MIN_CHART_WINDOW_HEIGHT)))
         self.chart_window.place_configure(width=width, height=height)
+        self._save_function_layout()
         return "break"
 
     def _finish_chart_window_resize(self, _event: tk.Event) -> str:
         self.floating_window_resize = None
+        self._save_function_layout()
         return "break"
 
     def _constrain_chart_window_to_desktop(self, _event: tk.Event) -> None:
         if not hasattr(self, "chart_window"):
+            return
+        if self.desktop.winfo_width() < MIN_CHART_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_CHART_WINDOW_HEIGHT:
             return
         desktop_width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
         desktop_height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
@@ -452,6 +548,19 @@ class MarketTerminalApp(tk.Tk):
         width = min(max(self.chart_window.winfo_width(), MIN_CHART_WINDOW_WIDTH), desktop_width - left)
         height = min(max(self.chart_window.winfo_height(), MIN_CHART_WINDOW_HEIGHT), desktop_height - top)
         self.chart_window.place_configure(x=left, y=top, width=width, height=height)
+        if hasattr(self, "watchlist_window"):
+            self._constrain_watchlist_window_to_desktop()
+
+    def _constrain_watchlist_window_to_desktop(self) -> None:
+        if self.desktop.winfo_width() < 360 or self.desktop.winfo_height() < 260:
+            return
+        desktop_width = max(self.desktop.winfo_width(), 360)
+        desktop_height = max(self.desktop.winfo_height(), 260)
+        left = max(0, min(self.watchlist_window.winfo_x(), max(desktop_width - 360, 0)))
+        top = max(0, min(self.watchlist_window.winfo_y(), max(desktop_height - 260, 0)))
+        width = min(max(self.watchlist_window.winfo_width(), 360), desktop_width - left)
+        height = min(max(self.watchlist_window.winfo_height(), 260), desktop_height - top)
+        self.watchlist_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _start_watchlist_window_drag(self, event: tk.Event) -> str:
         self.watchlist_window.lift()
@@ -475,10 +584,12 @@ class MarketTerminalApp(tk.Tk):
         left = max(0, min(left, max(desktop_width - width, 0)))
         top = max(0, min(top, max(desktop_height - height, 0)))
         self.watchlist_window.place_configure(x=left, y=top)
+        self._save_function_layout()
         return "break"
 
     def _finish_watchlist_window_drag(self, _event: tk.Event) -> str:
         self.floating_window_drag = None
+        self._save_function_layout()
         return "break"
 
     def _start_watchlist_window_resize(self, event: tk.Event) -> str:
@@ -503,10 +614,12 @@ class MarketTerminalApp(tk.Tk):
         width = max(360, min(width, max(desktop_width - left, 360)))
         height = max(260, min(height, max(desktop_height - top, 260)))
         self.watchlist_window.place_configure(width=width, height=height)
+        self._save_function_layout()
         return "break"
 
     def _finish_watchlist_window_resize(self, _event: tk.Event) -> str:
         self.floating_window_resize = None
+        self._save_function_layout()
         return "break"
 
     def _build_watchlist_window(self) -> None:
@@ -533,6 +646,11 @@ class MarketTerminalApp(tk.Tk):
             widget.bind("<ButtonPress-1>", self._start_watchlist_window_drag)
             widget.bind("<B1-Motion>", self._drag_watchlist_window)
             widget.bind("<ButtonRelease-1>", self._finish_watchlist_window_drag)
+        self._build_group_selector(
+            self.watchlist_titlebar,
+            self.watchlist_group_var,
+            self._on_watchlist_group_changed,
+        )
         tk.Button(
             self.watchlist_titlebar,
             text="REFRESH",
@@ -565,6 +683,7 @@ class MarketTerminalApp(tk.Tk):
             self.watchlist_tree.column(column, width=width, anchor=tk.W)
         self.watchlist_tree.pack(fill=tk.BOTH, expand=True)
         self.watchlist_tree.bind("<Double-Button-1>", self._begin_watchlist_asset_search)
+        self.watchlist_tree.bind("<<TreeviewSelect>>", self._on_watchlist_selection_changed)
         actions = ttk.Frame(content, style="Panel.TFrame")
         actions.pack(fill=tk.X, pady=(7, 0))
         ttk.Button(actions, text="ADD ROW", command=self._add_watchlist_row).pack(side=tk.LEFT)
@@ -587,17 +706,43 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_resize_grip.bind("<ButtonPress-1>", self._start_watchlist_window_resize)
         self.watchlist_resize_grip.bind("<B1-Motion>", self._resize_watchlist_window)
         self.watchlist_resize_grip.bind("<ButtonRelease-1>", self._finish_watchlist_window_resize)
-        for _position in range(8):
+        for row in self.saved_watchlist_state:
+            self._add_watchlist_row(row)
+        for _position in range(max(8 - len(self.saved_watchlist_state), 0)):
             self._add_watchlist_row()
 
-    def _add_watchlist_row(self) -> None:
+    def _add_watchlist_row(self, row: dict | None = None) -> None:
         item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
-        self.watchlist_tree.insert("", tk.END, iid=item, values=("", "", "", "", ""))
+        instrument = instrument_from_watchlist_row(row or {})
+        values = (watchlist_asset_label(instrument), "", "", "", "") if instrument else ("", "", "", "", "")
+        self.watchlist_tree.insert("", tk.END, iid=item, values=values)
+        if instrument:
+            self.watchlist_instruments[item] = instrument
 
     def _remove_watchlist_row(self) -> None:
         for item in self.watchlist_tree.selection():
             self.watchlist_instruments.pop(item, None)
             self.watchlist_tree.delete(item)
+        self._save_watchlist_state()
+
+    def _on_watchlist_selection_changed(self, _event: tk.Event | None = None) -> None:
+        selected = self.watchlist_tree.selection()
+        if not selected:
+            return
+        instrument = self.watchlist_instruments.get(selected[0])
+        if instrument is None:
+            return
+        self._open_grouped_chart_from_watchlist(instrument)
+
+    def _open_grouped_chart_from_watchlist(self, instrument: Instrument) -> None:
+        if self.watchlist_group_var.get() != self.chart_group_var.get():
+            return
+        if self.chart_instruments and self.chart_instruments[0].symbol == instrument.symbol:
+            return
+        self.status_var.set(
+            f"Group {self.watchlist_group_var.get()}: opening {instrument.symbol} in chart."
+        )
+        self._open_instrument(instrument)
 
     def _begin_watchlist_asset_search(self, event: tk.Event) -> str:
         item = self.watchlist_tree.identify_row(event.y)
@@ -737,7 +882,37 @@ class MarketTerminalApp(tk.Tk):
 
     def _close_app(self) -> None:
         self._save_window_state()
+        self._save_watchlist_state()
+        if self.layout_save_after_id:
+            self.after_cancel(self.layout_save_after_id)
         self.destroy()
+
+    def _schedule_function_layout_save(self) -> None:
+        if self.layout_save_after_id:
+            self.after_cancel(self.layout_save_after_id)
+        self.layout_save_after_id = self.after(120, self._save_function_layout)
+
+    def _manual_save_function_layout(self) -> None:
+        self._save_function_layout(show_status=True)
+        self.layout_manually_saved = True
+
+    def _save_function_layout(self, show_status: bool = False) -> None:
+        self.layout_save_after_id = None
+        self.update_idletasks()
+        layout = {
+            "watchlist": window_place_geometry(self.watchlist_window),
+            "chart": window_place_geometry(self.chart_window),
+        }
+        save_layout_state(self.layout_state_path, layout)
+        self.saved_layout_state = layout
+        if show_status:
+            watch = layout["watchlist"]
+            chart = layout["chart"]
+            self.status_var.set(
+                "Layout saved"
+                f" | Watchlist {watch['width']}x{watch['height']}+{watch['x']}+{watch['y']}"
+                f" | Chart {chart['width']}x{chart['height']}+{chart['x']}+{chart['y']}"
+            )
 
     def _build_suggestion_popup(self) -> None:
         self.suggestion_popup = tk.Toplevel(self)
@@ -1752,11 +1927,19 @@ class MarketTerminalApp(tk.Tk):
         )
         self.search_action_var.set("OPEN SECURITY")
         self.watchlist_search_var.set("")
+        self._save_watchlist_state()
         self._refresh_watchlist_item(item, instrument)
 
     def refresh_watchlist(self) -> None:
         for item, instrument in list(self.watchlist_instruments.items()):
             self._refresh_watchlist_item(item, instrument)
+
+    def _save_watchlist_state(self) -> None:
+        rows = []
+        for item in self.watchlist_tree.get_children():
+            instrument = self.watchlist_instruments.get(item)
+            rows.append(watchlist_row_from_instrument(instrument))
+        save_watchlist_state(self.watchlist_state_path, rows)
 
     def _refresh_watchlist_item(self, item: str, instrument: Instrument) -> None:
         self._run_background(
@@ -2574,6 +2757,85 @@ def load_window_state(path: Path) -> dict[str, str]:
     if state not in {"normal", "zoomed"}:
         state = "normal"
     return {"geometry": geometry, "state": state}
+
+
+def load_watchlist_state(path: Path) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def load_layout_state(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_layout_state(path: Path, layout: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(layout, indent=2), encoding="utf-8")
+
+
+def window_place_geometry(widget: tk.Widget) -> dict[str, int]:
+    return {
+        "x": int(widget.winfo_x()),
+        "y": int(widget.winfo_y()),
+        "width": int(widget.winfo_width()),
+        "height": int(widget.winfo_height()),
+    }
+
+
+def save_watchlist_state(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+
+def watchlist_row_from_instrument(instrument: Instrument | None) -> dict:
+    if instrument is None:
+        return {}
+    return {
+        "symbol": instrument.symbol,
+        "name": instrument.name,
+        "exchange": instrument.exchange,
+        "quote_type": instrument.quote_type,
+        "currency": instrument.currency,
+        "source": instrument.source,
+        "figi": instrument.figi,
+        "market_cap": instrument.market_cap,
+        "aum": instrument.aum,
+        "isin": instrument.isin,
+    }
+
+
+def instrument_from_watchlist_row(row: dict) -> Instrument | None:
+    symbol = str(row.get("symbol", "")).strip()
+    if not symbol:
+        return None
+    return Instrument(
+        symbol=symbol,
+        name=str(row.get("name", "") or symbol),
+        exchange=str(row.get("exchange", "") or ""),
+        quote_type=str(row.get("quote_type", "") or ""),
+        currency=str(row.get("currency", "") or ""),
+        source=str(row.get("source", "") or "Yahoo Finance"),
+        figi=str(row.get("figi", "") or ""),
+        market_cap=_optional_float_from_json(row.get("market_cap")),
+        aum=_optional_float_from_json(row.get("aum")),
+        isin=str(row.get("isin", "") or ""),
+    )
+
+
+def _optional_float_from_json(value) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def save_window_geometry(path: Path, geometry: str, window_state: str = "normal") -> None:
