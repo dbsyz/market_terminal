@@ -2,7 +2,6 @@
 
 ## Active
 
-- Expose provider registry and health/status reporting in the desktop app.
 - Validate and implement SEC EDGAR company facts and recent filings as the next high-value free data source.
 - Initialize this folder as its own Git repository after reviewing the first standardized metadata pass.
 - Decide whether to keep using the shared `test_venv` or move to a project-local `.venv`.
@@ -24,3 +23,4 @@
 - Added `PROJECT.md` as agent-facing operating context.
 - Added `DATA_ROADMAP.md` for free/public data-source priorities.
 - Added `provider_registry.py` for provider metadata and non-network health checks.
+- Exposed provider health/status reporting through the desktop app header.

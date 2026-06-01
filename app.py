@@ -29,6 +29,7 @@ from .models import (
     MarketSession,
     RangeSpec,
 )
+from .provider_registry import provider_health_summary
 from .providers import MarketDataProvider
 
 
@@ -55,7 +56,13 @@ SERIES_COLORS = (
 MAX_SERIES = 10
 SEARCH_DEBOUNCE_MS = 275
 SOURCE_WATCH_INTERVAL_MS = 1000
-RUNTIME_SOURCE_FILES = ("app.py", "models.py", "providers.py", "run.py")
+RUNTIME_SOURCE_FILES = (
+    "app.py",
+    "models.py",
+    "providers.py",
+    "provider_registry.py",
+    "run.py",
+)
 DEFAULT_WINDOW_GEOMETRY = "1300x820"
 MIN_WINDOW_WIDTH = 1040
 MIN_WINDOW_HEIGHT = 650
@@ -291,6 +298,12 @@ class MarketTerminalApp(tk.Tk):
             style="Chip.TButton",
             command=self._manual_save_function_layout,
         ).pack(side=tk.RIGHT, pady=(2, 0))
+        ttk.Button(
+            header,
+            text="DATA STATUS",
+            style="Chip.TButton",
+            command=self._show_provider_status,
+        ).pack(side=tk.RIGHT, padx=(0, 8), pady=(2, 0))
 
         self._build_update_banner()
         workspace = ttk.Frame(self, padding=(18, 0, 18, 0))
@@ -907,6 +920,11 @@ class MarketTerminalApp(tk.Tk):
     def _manual_save_function_layout(self) -> None:
         self._save_function_layout(show_status=True)
         self.layout_manually_saved = True
+
+    def _show_provider_status(self) -> None:
+        summary = provider_health_summary()
+        self.status_var.set("Provider status report opened.")
+        messagebox.showinfo("Data Provider Status", summary, parent=self)
 
     def _save_function_layout(self, show_status: bool = False) -> None:
         self.layout_save_after_id = None
