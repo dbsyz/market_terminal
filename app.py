@@ -30,6 +30,7 @@ from .models import (
     MarketSession,
     RangeSpec,
 )
+from .macro_dashboard import MacroDashboardService, MacroDashboardSnapshot
 from .provider_registry import provider_health_summary
 from .providers import MarketDataProvider
 from .sec_edgar import SecCompanyContext, SecEdgarClient, format_sec_company_context
@@ -71,6 +72,8 @@ MIN_WINDOW_WIDTH = 1040
 MIN_WINDOW_HEIGHT = 650
 MIN_CHART_WINDOW_WIDTH = 620
 MIN_CHART_WINDOW_HEIGHT = 420
+MIN_MACRO_WINDOW_WIDTH = 520
+MIN_MACRO_WINDOW_HEIGHT = 320
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,7 @@ class MarketTerminalApp(tk.Tk):
     def __init__(self, provider: MarketDataProvider | None = None) -> None:
         super().__init__()
         self.provider = provider or MarketDataProvider()
+        self.macro_service = MacroDashboardService()
         self.title("Market Terminal | Price Charts")
         self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.configure(bg=BG)
@@ -136,6 +140,8 @@ class MarketTerminalApp(tk.Tk):
         self.historical_end_var = tk.StringVar(value="")
         self.chart_group_var = tk.StringVar(value="A")
         self.watchlist_group_var = tk.StringVar(value="A")
+        self.macro_category_var = tk.StringVar(value="rates")
+        self.macro_status_var = tk.StringVar(value="FRED macro dashboard")
         self.search_action_var = tk.StringVar(value="OPEN SECURITY")
         self.search_sort_var = tk.StringVar(value="Relevance")
         self.exchange_filter_var = tk.StringVar(value="All Markets")
@@ -411,6 +417,7 @@ class MarketTerminalApp(tk.Tk):
         )
         self._build_suggestion_popup()
         self._build_watchlist_window()
+        self._build_macro_window()
         self.after_idle(self._layout_initial_workspace_windows)
         self.after_idle(self.refresh_watchlist)
 
@@ -426,6 +433,7 @@ class MarketTerminalApp(tk.Tk):
         height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
         watch_width = min(430, max(360, int(width * 0.32)))
         chart_width = max(MIN_CHART_WINDOW_WIDTH, width - watch_width - 10)
+        macro_height = min(max(320, int(height * 0.38)), height)
         self.watchlist_window.place_configure(
             x=0,
             y=0,
@@ -433,6 +441,12 @@ class MarketTerminalApp(tk.Tk):
             height=min(height, 520),
         )
         self.chart_window.place_configure(x=watch_width + 10, y=0, width=chart_width, height=height)
+        self.macro_window.place_configure(
+            x=0,
+            y=min(height - macro_height, 530),
+            width=watch_width,
+            height=macro_height,
+        )
         self._mark_layout_saved_snapshot()
 
     def _restore_saved_function_layout(self) -> bool:
@@ -442,6 +456,7 @@ class MarketTerminalApp(tk.Tk):
         for name, widget, minimum_width, minimum_height in (
             ("watchlist", self.watchlist_window, 360, 260),
             ("chart", self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT),
+            ("macro", self.macro_window, MIN_MACRO_WINDOW_WIDTH, MIN_MACRO_WINDOW_HEIGHT),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
@@ -454,6 +469,7 @@ class MarketTerminalApp(tk.Tk):
             restored = True
         self._constrain_chart_window_to_desktop(None)
         self._constrain_watchlist_window_to_desktop()
+        self._constrain_macro_window_to_desktop()
         self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
 
@@ -461,6 +477,7 @@ class MarketTerminalApp(tk.Tk):
         for name, widget in (
             ("watchlist", self.watchlist_window),
             ("chart", self.chart_window),
+            ("macro", self.macro_window),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
@@ -579,6 +596,8 @@ class MarketTerminalApp(tk.Tk):
         self.chart_window.place_configure(x=left, y=top, width=width, height=height)
         if hasattr(self, "watchlist_window"):
             self._constrain_watchlist_window_to_desktop()
+        if hasattr(self, "macro_window"):
+            self._constrain_macro_window_to_desktop()
 
     def _constrain_watchlist_window_to_desktop(self) -> None:
         if self.desktop.winfo_width() < 360 or self.desktop.winfo_height() < 260:
@@ -590,6 +609,17 @@ class MarketTerminalApp(tk.Tk):
         width = min(max(self.watchlist_window.winfo_width(), 360), desktop_width - left)
         height = min(max(self.watchlist_window.winfo_height(), 260), desktop_height - top)
         self.watchlist_window.place_configure(x=left, y=top, width=width, height=height)
+
+    def _constrain_macro_window_to_desktop(self) -> None:
+        if self.desktop.winfo_width() < MIN_MACRO_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_MACRO_WINDOW_HEIGHT:
+            return
+        desktop_width = max(self.desktop.winfo_width(), MIN_MACRO_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_MACRO_WINDOW_HEIGHT)
+        left = max(0, min(self.macro_window.winfo_x(), max(desktop_width - MIN_MACRO_WINDOW_WIDTH, 0)))
+        top = max(0, min(self.macro_window.winfo_y(), max(desktop_height - MIN_MACRO_WINDOW_HEIGHT, 0)))
+        width = min(max(self.macro_window.winfo_width(), MIN_MACRO_WINDOW_WIDTH), desktop_width - left)
+        height = min(max(self.macro_window.winfo_height(), MIN_MACRO_WINDOW_HEIGHT), desktop_height - top)
+        self.macro_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _start_watchlist_window_drag(self, event: tk.Event) -> str:
         self.watchlist_window.lift()
@@ -647,6 +677,66 @@ class MarketTerminalApp(tk.Tk):
         return "break"
 
     def _finish_watchlist_window_resize(self, _event: tk.Event) -> str:
+        self.floating_window_resize = None
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _start_macro_window_drag(self, event: tk.Event) -> str:
+        self.macro_window.lift()
+        self.floating_window_drag = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "left": self.macro_window.winfo_x(),
+            "top": self.macro_window.winfo_y(),
+        }
+        return "break"
+
+    def _drag_macro_window(self, event: tk.Event) -> str:
+        if not self.floating_window_drag:
+            return "break"
+        desktop_width = max(self.desktop.winfo_width(), MIN_MACRO_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_MACRO_WINDOW_HEIGHT)
+        width = self.macro_window.winfo_width()
+        height = self.macro_window.winfo_height()
+        left = self.floating_window_drag["left"] + event.x_root - self.floating_window_drag["x"]
+        top = self.floating_window_drag["top"] + event.y_root - self.floating_window_drag["y"]
+        left = max(0, min(left, max(desktop_width - width, 0)))
+        top = max(0, min(top, max(desktop_height - height, 0)))
+        self.macro_window.place_configure(x=left, y=top)
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _finish_macro_window_drag(self, _event: tk.Event) -> str:
+        self.floating_window_drag = None
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _start_macro_window_resize(self, event: tk.Event) -> str:
+        self.macro_window.lift()
+        self.floating_window_resize = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "width": self.macro_window.winfo_width(),
+            "height": self.macro_window.winfo_height(),
+        }
+        return "break"
+
+    def _resize_macro_window(self, event: tk.Event) -> str:
+        if not self.floating_window_resize:
+            return "break"
+        left = self.macro_window.winfo_x()
+        top = self.macro_window.winfo_y()
+        desktop_width = max(self.desktop.winfo_width(), MIN_MACRO_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_MACRO_WINDOW_HEIGHT)
+        width = self.floating_window_resize["width"] + event.x_root - self.floating_window_resize["x"]
+        height = self.floating_window_resize["height"] + event.y_root - self.floating_window_resize["y"]
+        width = max(MIN_MACRO_WINDOW_WIDTH, min(width, max(desktop_width - left, MIN_MACRO_WINDOW_WIDTH)))
+        height = max(MIN_MACRO_WINDOW_HEIGHT, min(height, max(desktop_height - top, MIN_MACRO_WINDOW_HEIGHT)))
+        self.macro_window.place_configure(width=width, height=height)
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _finish_macro_window_resize(self, _event: tk.Event) -> str:
         self.floating_window_resize = None
         self._mark_layout_dirty_if_changed()
         return "break"
@@ -739,6 +829,102 @@ class MarketTerminalApp(tk.Tk):
             self._add_watchlist_row(row)
         for _position in range(max(8 - len(self.saved_watchlist_state), 0)):
             self._add_watchlist_row()
+
+    def _build_macro_window(self) -> None:
+        self.macro_window = tk.Frame(
+            self.desktop,
+            bg=PANEL,
+            highlightbackground=GRID,
+            highlightthickness=1,
+        )
+        self.macro_window.place(x=0, y=530, width=430, height=340)
+        self.macro_titlebar = tk.Frame(self.macro_window, bg=GRID, height=28, cursor="fleur")
+        self.macro_titlebar.pack(fill=tk.X)
+        self.macro_titlebar.pack_propagate(False)
+        label = tk.Label(
+            self.macro_titlebar,
+            text="MACRO",
+            bg=GRID,
+            fg=TEXT,
+            font=("Segoe UI", 9, "bold"),
+            padx=9,
+        )
+        label.pack(side=tk.LEFT)
+        for widget in (self.macro_titlebar, label):
+            widget.bind("<ButtonPress-1>", self._start_macro_window_drag)
+            widget.bind("<B1-Motion>", self._drag_macro_window)
+            widget.bind("<ButtonRelease-1>", self._finish_macro_window_drag)
+        category_menu = tk.OptionMenu(
+            self.macro_titlebar,
+            self.macro_category_var,
+            "rates",
+            "inflation",
+            "labor",
+            "growth",
+            "money",
+            "credit",
+        )
+        category_menu.configure(
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=6,
+            pady=0,
+            highlightthickness=0,
+        )
+        category_menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
+        category_menu.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        tk.Button(
+            self.macro_titlebar,
+            text="REFRESH",
+            command=self.refresh_macro_dashboard,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        content = ttk.Frame(self.macro_window, style="Panel.TFrame", padding=7)
+        content.pack(fill=tk.BOTH, expand=True)
+        self.macro_tree = ttk.Treeview(
+            content,
+            columns=("series", "title", "latest", "change", "date"),
+            show="headings",
+            height=8,
+        )
+        for column, title, width in (
+            ("series", "Series", 92),
+            ("title", "Indicator", 210),
+            ("latest", "Latest", 90),
+            ("change", "Chg", 75),
+            ("date", "Date", 95),
+        ):
+            self.macro_tree.heading(column, text=title)
+            self.macro_tree.column(column, width=width, anchor=tk.W)
+        self.macro_tree.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            content,
+            textvariable=self.macro_status_var,
+            style="Status.TLabel",
+            padding=(0, 6),
+        ).pack(fill=tk.X)
+        self.macro_resize_grip = tk.Frame(
+            self.macro_window,
+            bg=ORANGE,
+            width=15,
+            height=15,
+            cursor="size_nw_se",
+        )
+        self.macro_resize_grip.place(relx=1.0, rely=1.0, anchor=tk.SE)
+        self.macro_resize_grip.bind("<ButtonPress-1>", self._start_macro_window_resize)
+        self.macro_resize_grip.bind("<B1-Motion>", self._resize_macro_window)
+        self.macro_resize_grip.bind("<ButtonRelease-1>", self._finish_macro_window_resize)
 
     def _add_watchlist_row(self, row: dict | None = None) -> None:
         item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
@@ -944,6 +1130,7 @@ class MarketTerminalApp(tk.Tk):
         layout = {
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
+            "macro": window_place_geometry(self.macro_window),
         }
         save_layout_state(self.layout_state_path, layout)
         self.saved_layout_state = layout
@@ -963,6 +1150,7 @@ class MarketTerminalApp(tk.Tk):
         return {
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
+            "macro": window_place_geometry(self.macro_window),
         }
 
     def _mark_layout_saved_snapshot(self) -> None:
@@ -1999,6 +2187,34 @@ class MarketTerminalApp(tk.Tk):
     def refresh_watchlist(self) -> None:
         for item, instrument in list(self.watchlist_instruments.items()):
             self._refresh_watchlist_item(item, instrument)
+
+    def refresh_macro_dashboard(self) -> None:
+        category = self.macro_category_var.get()
+        self.macro_status_var.set(f"Loading FRED {category} series...")
+        self.macro_tree.delete(*self.macro_tree.get_children())
+        self._run_background(
+            lambda: self.macro_service.snapshot(category, observation_start="2018-01-01"),
+            self._update_macro_dashboard,
+            "Macro request failed",
+        )
+
+    def _update_macro_dashboard(self, snapshot: MacroDashboardSnapshot) -> None:
+        self.macro_tree.delete(*self.macro_tree.get_children())
+        for item in snapshot.series:
+            self.macro_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    item.series.series_id,
+                    item.series.title,
+                    format_quote_value(item.latest_value),
+                    format_signed_value(item.change),
+                    item.latest_date.date().isoformat() if item.latest_date is not None else "",
+                ),
+            )
+        self.macro_status_var.set(
+            f"{len(snapshot.series)} {snapshot.category} series via {snapshot.source}."
+        )
 
     def _save_watchlist_state(self) -> None:
         rows = []
@@ -3361,6 +3577,12 @@ def format_quote_value(value: float | None) -> str:
     if abs(value) >= 10:
         return f"{value:,.3f}"
     return f"{value:,.4f}"
+
+
+def format_signed_value(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:+,.2f}"
 
 
 def format_market_cap(market_cap: float | None) -> str:

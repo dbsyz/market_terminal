@@ -2,7 +2,7 @@
 
 ## Active
 
-- Add desktop UI entry point for curated FRED macro dashboard.
+- Improve Macro function window with sparkline/charting and provider/cache status.
 
 ## Backlog
 
@@ -31,3 +31,4 @@
 - Added SEC cache age display and clear-cache control.
 - Added `fred_macro.py` for FRED observations and curated macro/rates series metadata.
 - Added `macro_dashboard.py` for UI-independent macro dashboard snapshots.
+- Added a floating Macro function window for curated FRED categories.
