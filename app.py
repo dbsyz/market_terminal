@@ -420,6 +420,7 @@ class MarketTerminalApp(tk.Tk):
         self._build_macro_window()
         self.after_idle(self._layout_initial_workspace_windows)
         self.after_idle(self.refresh_watchlist)
+        self.after(450, self.refresh_macro_dashboard)
 
     def _layout_initial_workspace_windows(self) -> None:
         self.desktop.update_idletasks()
