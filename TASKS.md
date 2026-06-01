@@ -2,7 +2,7 @@
 
 ## Active
 
-- Add a richer SEC filings/fundamentals panel with clickable filing links and caching.
+- Add persistent SEC cache policy and cache invalidation controls.
 
 ## Backlog
 
@@ -26,3 +26,4 @@
 - Established Git rollback checkpoints for the agent workflow and data-provider foundation.
 - Kept the shared `test_venv` as the current working environment.
 - Added a manual UI smoke-test checklist to `PROJECT.md`.
+- Added a richer SEC details popup with fundamentals, filings, and filing-link opening.

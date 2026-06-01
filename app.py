@@ -8,6 +8,7 @@ import sys
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ from .models import (
 )
 from .provider_registry import provider_health_summary
 from .providers import MarketDataProvider
-from .sec_edgar import SecEdgarClient, format_sec_company_context
+from .sec_edgar import SecCompanyContext, SecEdgarClient, format_sec_company_context
 
 
 BG = "#000000"
@@ -95,6 +96,7 @@ class MarketTerminalApp(tk.Tk):
         super().__init__()
         self.provider = provider or MarketDataProvider()
         self.sec_client = SecEdgarClient()
+        self.sec_context: SecCompanyContext | None = None
         self.title("Market Terminal | Price Charts")
         self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.configure(bg=BG)
@@ -1422,6 +1424,14 @@ class MarketTerminalApp(tk.Tk):
             command=self._toggle_compare_panel,
         )
         self.compare_button.pack(side=tk.LEFT)
+        self.sec_details_button = ttk.Button(
+            self.chart_toolbar,
+            text="SEC",
+            style="Chip.TButton",
+            command=self._show_sec_details,
+        )
+        self.sec_details_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.sec_details_button.state(["disabled"])
         self.chart_toolbar.lift()
         self._build_range_popup()
         self._build_compare_panel()
@@ -2289,6 +2299,8 @@ class MarketTerminalApp(tk.Tk):
 
     def _refresh_sec_context(self, instrument: Instrument) -> None:
         symbol = instrument.symbol.strip().upper()
+        self.sec_context = None
+        self.sec_details_button.state(["disabled"])
         self.sec_context_var.set("")
         if not symbol or symbol == "FORT_PNL" or any(marker in symbol for marker in ".=^/"):
             return
@@ -2308,10 +2320,103 @@ class MarketTerminalApp(tk.Tk):
             lambda: request_id == self.chart_request_id,
         )
 
-    def _update_sec_context(self, request_id: int, context) -> None:
+    def _update_sec_context(self, request_id: int, context: SecCompanyContext | None) -> None:
         if request_id != self.chart_request_id:
             return
+        self.sec_context = context
+        if context:
+            self.sec_details_button.state(["!disabled"])
         self.sec_context_var.set(format_sec_company_context(context) if context else "")
+
+    def _show_sec_details(self) -> None:
+        context = self.sec_context
+        if context is None:
+            self.status_var.set("SEC details are not loaded for the selected ticker.")
+            return
+        window = tk.Toplevel(self)
+        window.title(f"SEC Details | {context.company.ticker}")
+        window.configure(bg=BG)
+        window.geometry("860x520")
+        ttk.Label(
+            window,
+            text=f"{context.company.title} | CIK {context.company.cik}",
+            style="Quote.TLabel",
+            padding=(12, 10, 12, 4),
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        facts = ttk.Treeview(
+            window,
+            columns=("tag", "value", "period", "filed", "form"),
+            show="headings",
+            height=8,
+        )
+        for column, label, width in (
+            ("tag", "Fact", 220),
+            ("value", "Value", 160),
+            ("period", "Period", 110),
+            ("filed", "Filed", 110),
+            ("form", "Form", 80),
+        ):
+            facts.heading(column, text=label)
+            facts.column(column, width=width, anchor=tk.W)
+        for fact in context.fundamentals.facts[:12]:
+            facts.insert(
+                "",
+                tk.END,
+                values=(
+                    fact.tag,
+                    f"{fact.value} {fact.unit}",
+                    fact.fiscal_period or fact.end,
+                    fact.filed,
+                    fact.form,
+                ),
+            )
+        facts.pack(fill=tk.X, padx=12, pady=(4, 10))
+
+        filings = ttk.Treeview(
+            window,
+            columns=("form", "filed", "report", "document"),
+            show="headings",
+            height=8,
+        )
+        for column, label, width in (
+            ("form", "Form", 90),
+            ("filed", "Filed", 110),
+            ("report", "Report", 110),
+            ("document", "Primary Document", 420),
+        ):
+            filings.heading(column, text=label)
+            filings.column(column, width=width, anchor=tk.W)
+        for index, filing in enumerate(context.filings):
+            filings.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    filing.form,
+                    filing.filing_date,
+                    filing.report_date,
+                    filing.primary_document,
+                ),
+            )
+        filings.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+
+        def open_selected_filing() -> None:
+            selected = filings.selection()
+            if not selected:
+                self.status_var.set("Select an SEC filing to open.")
+                return
+            filing = context.filings[int(selected[0])]
+            webbrowser.open(filing.filing_url)
+            self.status_var.set(f"Opened SEC filing {filing.form} {filing.filing_date}.")
+
+        filings.bind("<Double-1>", lambda _event: open_selected_filing())
+        ttk.Button(
+            window,
+            text="OPEN SELECTED FILING",
+            style="Accent.TButton",
+            command=open_selected_filing,
+        ).pack(anchor=tk.E, padx=12, pady=(0, 12))
 
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
         if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):
