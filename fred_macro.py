@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from io import StringIO
 from typing import Any
 
 import pandas as pd
@@ -9,6 +10,7 @@ import requests
 
 
 FRED_API_BASE = "https://api.stlouisfed.org/fred"
+FRED_PUBLIC_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,10 @@ class FredClient:
 
     @property
     def enabled(self) -> bool:
+        return True
+
+    @property
+    def uses_api_key(self) -> bool:
         return bool(self.api_key)
 
     def observations(
@@ -82,6 +88,8 @@ class FredClient:
         observation_end: str = "",
         units: str = "lin",
     ) -> pd.DataFrame:
+        if not self.api_key:
+            return self._public_csv_frame(series_id, observation_start, observation_end)
         observations = self.observations(series_id, observation_start, observation_end, units)
         frame = pd.DataFrame(
             {"Value": [observation.value for observation in observations]},
@@ -108,6 +116,27 @@ class FredClient:
         response.raise_for_status()
         return response.json()
 
+    def _public_csv_frame(
+        self,
+        series_id: str,
+        observation_start: str = "",
+        observation_end: str = "",
+    ) -> pd.DataFrame:
+        response = self.session.get(
+            FRED_PUBLIC_CSV_URL,
+            params={"id": series_id},
+            timeout=15,
+        )
+        response.raise_for_status()
+        frame = parse_fred_csv(response.text, series_id)
+        if observation_start:
+            frame = frame.loc[frame.index >= pd.Timestamp(observation_start)]
+        if observation_end:
+            frame = frame.loc[frame.index <= pd.Timestamp(observation_end)]
+        frame.attrs["data_source"] = "FRED public CSV"
+        frame.attrs["series_id"] = series_id
+        return frame
+
 
 def curated_fred_series(category: str = "") -> tuple[FredSeriesSpec, ...]:
     if not category:
@@ -132,6 +161,23 @@ def parse_fred_observations(payload: dict[str, Any]) -> tuple[FredObservation, .
             )
         )
     return tuple(observations)
+
+
+def parse_fred_csv(csv_text: str, series_id: str) -> pd.DataFrame:
+    frame = pd.read_csv(StringIO(csv_text))
+    if "observation_date" in frame.columns:
+        date_column = "observation_date"
+    elif "DATE" in frame.columns:
+        date_column = "DATE"
+    else:
+        date_column = frame.columns[0]
+    value_column = series_id if series_id in frame.columns else frame.columns[-1]
+    frame[date_column] = pd.to_datetime(frame[date_column], errors="coerce")
+    frame[value_column] = pd.to_numeric(frame[value_column], errors="coerce")
+    frame = frame.dropna(subset=[date_column]).set_index(date_column).sort_index()
+    result = frame[[value_column]].rename(columns={value_column: "Value"})
+    result.index.name = "Date"
+    return result
 
 
 def _optional_float(value: Any) -> float | None:

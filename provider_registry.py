@@ -177,6 +177,14 @@ def _provider_health(spec: ProviderSpec) -> ProviderHealth:
             STATUS_LIMITED,
             "Default SEC User-Agent is active; set SEC_USER_AGENT for production use.",
         )
+    if spec.provider_id == "fred":
+        if _has_env_value(spec.credential_env):
+            return ProviderHealth(spec, STATUS_READY, f"{spec.credential_env} is configured.")
+        return ProviderHealth(
+            spec,
+            STATUS_LIMITED,
+            "Using public CSV fallback; set FRED_API_KEY for the official JSON API.",
+        )
     if spec.credential_env and not _has_env_value(spec.credential_env):
         return ProviderHealth(spec, STATUS_MISSING_KEY, f"Set {spec.credential_env} to enable.")
     return ProviderHealth(spec, STATUS_READY, "Configured.")

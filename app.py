@@ -2192,11 +2192,8 @@ class MarketTerminalApp(tk.Tk):
 
     def refresh_macro_dashboard(self) -> None:
         category = self.macro_category_var.get()
-        if not self.macro_service.fred.enabled:
-            self._populate_macro_placeholders()
-            self.macro_status_var.set("Set FRED_API_KEY in the environment to load macro values.")
-            return
-        self.macro_status_var.set(f"Loading FRED {category} series...")
+        source = "FRED API" if self.macro_service.fred.uses_api_key else "FRED public CSV"
+        self.macro_status_var.set(f"Loading {category} series via {source}...")
         self.macro_tree.delete(*self.macro_tree.get_children())
         self._run_background(
             lambda: self.macro_service.snapshot(category, observation_start="2018-01-01"),
@@ -2215,7 +2212,7 @@ class MarketTerminalApp(tk.Tk):
                 values=(spec.series_id, spec.title, "", "", ""),
             )
         self.macro_status_var.set(
-            f"{len(specs)} configured {category} FRED series. Refresh requires FRED_API_KEY."
+            f"{len(specs)} configured {category} FRED series. Refresh loads public FRED CSV."
         )
 
     def _update_macro_dashboard(self, snapshot: MacroDashboardSnapshot) -> None:

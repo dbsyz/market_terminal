@@ -48,7 +48,7 @@ These are architecture tasks needed before adding many more feeds.
 | Source | Best Use | Why It Matters | Requirements | Notes |
 | --- | --- | --- | --- | --- |
 | SEC EDGAR APIs | US company filings, submissions, XBRL company facts | Core free fundamentals and filing events for US-listed companies | No API key, but requires respectful request headers/rate behavior | Initial client exists in `sec_edgar.py`; next step is selected-ticker UI integration. |
-| FRED | US macro, rates, inflation, employment, credit, monetary aggregates | Essential macro dashboard and chart overlays | Free API key | Initial curated-series client exists in `fred_macro.py`; next step is macro dashboard/UI integration. |
+| FRED | US macro, rates, inflation, employment, credit, monetary aggregates | Essential macro dashboard and chart overlays | Public CSV fallback works without a key; free API key enables the official JSON API | Initial curated-series client exists in `fred_macro.py`; next step is macro dashboard/UI integration. |
 | ECB Data Portal | Euro-area rates, money, FX reference, macro statistics | Essential for EUR rates/macro context | No app-specific key expected for SDMX API | Add SDMX client with curated euro dashboard. |
 | U.S. Treasury Fiscal Data | Debt, Treasury statements, fiscal datasets | Public debt, deficit, Treasury operations context | No key for public API | Start with public debt and selected daily/monthly fiscal series. |
 | World Bank Indicators API | Global country macro/development indicators | Broad international macro context | No key | Good for slower-moving country dashboards, not real-time markets. |

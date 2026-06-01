@@ -5,6 +5,7 @@ import unittest
 from market_terminal.fred_macro import (
     FredClient,
     curated_fred_series,
+    parse_fred_csv,
     parse_fred_observations,
 )
 
@@ -12,6 +13,7 @@ from market_terminal.fred_macro import (
 class StubResponse:
     def __init__(self, payload) -> None:
         self.payload = payload
+        self.text = payload if isinstance(payload, str) else ""
 
     def raise_for_status(self) -> None:
         pass
@@ -61,6 +63,25 @@ class FredMacroTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             client.observations("DGS10")
+
+    def test_parses_public_fred_csv(self) -> None:
+        frame = parse_fred_csv(
+            "observation_date,DGS10\n2026-05-01,4.25\n2026-05-02,.\n",
+            "DGS10",
+        )
+
+        self.assertEqual(frame["Value"].iloc[0], 4.25)
+        self.assertTrue(frame["Value"].isna().iloc[1])
+
+    def test_client_uses_public_csv_without_api_key(self) -> None:
+        session = StubSession("observation_date,DGS10\n2026-05-01,4.25\n")
+        client = FredClient(api_key="", session=session)
+
+        frame = client.observations_frame("DGS10")
+
+        self.assertEqual(frame.attrs["data_source"], "FRED public CSV")
+        self.assertEqual(frame["Value"].iloc[0], 4.25)
+        self.assertEqual(session.request[1]["id"], "DGS10")
 
     def test_client_requests_json_observations(self) -> None:
         session = StubSession({"observations": [{"date": "2026-05-01", "value": "4.25"}]})
