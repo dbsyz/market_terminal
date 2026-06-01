@@ -3,7 +3,6 @@
 ## Active
 
 - Add a richer SEC filings/fundamentals panel with clickable filing links and caching.
-- Add a small smoke-test note for manual UI verification after chart or provider changes.
 
 ## Backlog
 
@@ -26,3 +25,4 @@
 - Exposed SEC company facts and recent filings as a non-blocking selected-ticker context line.
 - Established Git rollback checkpoints for the agent workflow and data-provider foundation.
 - Kept the shared `test_venv` as the current working environment.
+- Added a manual UI smoke-test checklist to `PROJECT.md`.

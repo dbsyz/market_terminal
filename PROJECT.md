@@ -79,3 +79,20 @@ These should not be committed.
 - README or PROJECT context is updated when run commands, dependencies, providers, or generated files change.
 - New generated/private files are covered by `.gitignore`.
 - UI behavior changes are manually smoke-tested by launching `run.py` when practical.
+
+## Manual UI Smoke Test
+
+For chart or desktop UI changes, launch from `C:\Users\syzdy\python`:
+
+```powershell
+test_venv\Scripts\python.exe market_terminal\run.py
+```
+
+Minimum smoke path:
+
+- Search and open `AAPL`.
+- Confirm the chart renders, the status bar shows a data source, and the app remains responsive.
+- Click `DATA STATUS` and confirm a provider status dialog opens.
+- For a US equity, confirm the SEC context line either loads facts/filings or stays non-blocking if SEC is unavailable.
+- Add one comparison series, then remove it.
+- Save layout and close/reopen if layout behavior changed.
