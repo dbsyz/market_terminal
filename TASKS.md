@@ -2,7 +2,7 @@
 
 ## Active
 
-- Validate and implement SEC EDGAR company facts and recent filings as the next high-value free data source.
+- Expose SEC EDGAR company facts and recent filings in the selected-ticker workflow.
 - Initialize this folder as its own Git repository after reviewing the first standardized metadata pass.
 - Decide whether to keep using the shared `test_venv` or move to a project-local `.venv`.
 - Add a small smoke-test note for manual UI verification after chart or provider changes.
@@ -24,3 +24,4 @@
 - Added `DATA_ROADMAP.md` for free/public data-source priorities.
 - Added `provider_registry.py` for provider metadata and non-network health checks.
 - Exposed provider health/status reporting through the desktop app header.
+- Added `sec_edgar.py` for SEC ticker lookup, recent filing parsing, and XBRL company-facts snapshots.

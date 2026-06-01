@@ -47,7 +47,7 @@ These are architecture tasks needed before adding many more feeds.
 
 | Source | Best Use | Why It Matters | Requirements | Notes |
 | --- | --- | --- | --- | --- |
-| SEC EDGAR APIs | US company filings, submissions, XBRL company facts | Core free fundamentals and filing events for US-listed companies | No API key, but requires respectful request headers/rate behavior | Add CIK/ticker mapping, company facts normalizer, recent filings panel, and filing links. |
+| SEC EDGAR APIs | US company filings, submissions, XBRL company facts | Core free fundamentals and filing events for US-listed companies | No API key, but requires respectful request headers/rate behavior | Initial client exists in `sec_edgar.py`; next step is selected-ticker UI integration. |
 | FRED | US macro, rates, inflation, employment, credit, monetary aggregates | Essential macro dashboard and chart overlays | Free API key | Start with curated series packs instead of exposing the whole catalog immediately. |
 | ECB Data Portal | Euro-area rates, money, FX reference, macro statistics | Essential for EUR rates/macro context | No app-specific key expected for SDMX API | Add SDMX client with curated euro dashboard. |
 | U.S. Treasury Fiscal Data | Debt, Treasury statements, fiscal datasets | Public debt, deficit, Treasury operations context | No key for public API | Start with public debt and selected daily/monthly fiscal series. |
@@ -93,11 +93,11 @@ volume.
 
 ### Milestone 2: SEC Fundamentals And Filings
 
-- Add SEC client with respectful headers.
-- Implement ticker-to-CIK mapping.
-- Add company facts retrieval for a small curated field set.
+- Add SEC client with respectful headers. Done initially in `sec_edgar.py`.
+- Implement ticker-to-CIK mapping. Done initially via `SecEdgarClient.lookup_ticker()`.
+- Add company facts retrieval for a small curated field set. Done initially via `fundamental_snapshot()`.
 - Add recent filings list for selected ticker.
-- Add tests with recorded/minimal fixtures, not live network calls.
+- Add tests with recorded/minimal fixtures, not live network calls. Done initially in `tests/test_sec_edgar.py`.
 
 ### Milestone 3: Macro Data Backbone
 

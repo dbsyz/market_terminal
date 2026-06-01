@@ -24,7 +24,8 @@ class ProviderRegistryTests(unittest.TestCase):
 
         self.assertIn("yahoo", [spec.provider_id for spec in specs])
         self.assertIn("sec_edgar", [spec.provider_id for spec in specs])
-        self.assertFalse(next(spec for spec in specs if spec.provider_id == "sec_edgar").implemented)
+        self.assertIn("fred", [spec.provider_id for spec in specs])
+        self.assertTrue(next(spec for spec in specs if spec.provider_id == "sec_edgar").implemented)
 
     def test_marks_keyless_openfigi_as_limited_not_disabled(self) -> None:
         with patch.dict(os.environ, {"OPENFIGI_API_KEY": ""}, clear=False):
@@ -56,10 +57,15 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual(health["fort_pnl"].status, STATUS_MISSING_FILES)
         self.assertIn("fort_pnl_index_summary.csv", health["fort_pnl"].detail)
 
+    def test_marks_sec_edgar_as_limited_without_custom_user_agent(self) -> None:
+        health = _health_by_id()
+
+        self.assertEqual(health["sec_edgar"].status, STATUS_LIMITED)
+
     def test_marks_planned_sources_as_planned(self) -> None:
         health = _health_by_id()
 
-        self.assertEqual(health["sec_edgar"].status, STATUS_PLANNED)
+        self.assertEqual(health["fred"].status, STATUS_PLANNED)
 
     def test_summary_is_human_readable(self) -> None:
         summary = provider_health_summary(include_planned=False)

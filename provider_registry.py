@@ -86,19 +86,20 @@ IMPLEMENTED_PROVIDER_SPECS = (
         implemented=True,
         notes="Local private portfolio files; never commit source data.",
     ),
-)
-
-
-PLANNED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="sec_edgar",
         name="SEC EDGAR APIs",
         features=("filings", "fundamentals", "company_facts"),
         asset_classes=("us_equities",),
         docs_url="https://www.sec.gov/search-filings/edgar-application-programming-interfaces",
-        implemented=False,
-        notes="Highest-priority next integration for US filings and XBRL company facts.",
+        implemented=True,
+        credential_env="SEC_USER_AGENT",
+        notes="Public SEC filings and XBRL facts; requires declared User-Agent and fair-access behavior.",
     ),
+)
+
+
+PLANNED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="fred",
         name="FRED",
@@ -168,6 +169,14 @@ def _provider_health(spec: ProviderSpec) -> ProviderHealth:
             detail = "Missing local files: " + ", ".join(path.name for path in missing)
             return ProviderHealth(spec, STATUS_MISSING_FILES, detail)
         return ProviderHealth(spec, STATUS_READY, "Required local portfolio files are present.")
+    if spec.provider_id == "sec_edgar":
+        if _has_env_value(spec.credential_env):
+            return ProviderHealth(spec, STATUS_READY, f"{spec.credential_env} is configured.")
+        return ProviderHealth(
+            spec,
+            STATUS_LIMITED,
+            "Default SEC User-Agent is active; set SEC_USER_AGENT for production use.",
+        )
     if spec.credential_env and not _has_env_value(spec.credential_env):
         return ProviderHealth(spec, STATUS_MISSING_KEY, f"Set {spec.credential_env} to enable.")
     return ProviderHealth(spec, STATUS_READY, "Configured.")

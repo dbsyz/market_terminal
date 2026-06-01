@@ -62,6 +62,7 @@ RUNTIME_SOURCE_FILES = (
     "providers.py",
     "provider_registry.py",
     "run.py",
+    "sec_edgar.py",
 )
 DEFAULT_WINDOW_GEOMETRY = "1300x820"
 MIN_WINDOW_WIDTH = 1040
