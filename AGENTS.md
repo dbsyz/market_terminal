@@ -90,6 +90,7 @@ Existing responsibilities:
 - `agent_loop.py`: reusable agentic market-review loop
 - `sec_edgar.py`: SEC company ticker, submissions, filing, and XBRL company-facts client
 - `fred_macro.py`: FRED macro/rates curated-series client foundation
+- `macro_dashboard.py`: UI-independent macro dashboard snapshot service
 - `DATA_ROADMAP.md`: free/public data-source roadmap and integration priorities
 - `tests/`: unit tests
 - `out/`: generated runtime state, local caches, and outputs

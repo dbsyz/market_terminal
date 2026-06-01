@@ -2,7 +2,7 @@
 
 ## Active
 
-- Add macro dashboard data model and UI entry point for curated FRED series.
+- Add desktop UI entry point for curated FRED macro dashboard.
 
 ## Backlog
 
@@ -30,3 +30,4 @@
 - Added in-session and ignored disk caching for SEC EDGAR JSON responses.
 - Added SEC cache age display and clear-cache control.
 - Added `fred_macro.py` for FRED observations and curated macro/rates series metadata.
+- Added `macro_dashboard.py` for UI-independent macro dashboard snapshots.

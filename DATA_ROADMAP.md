@@ -104,7 +104,7 @@ volume.
 
 - Add FRED client and curated series registry. Done initially in `fred_macro.py`.
 - Add ECB SDMX client for key euro-area rates/macro series.
-- Add macro dashboard data model independent of Tkinter UI.
+- Add macro dashboard data model independent of Tkinter UI. Done initially in `macro_dashboard.py`.
 
 ### Milestone 4: News Monitoring
 
