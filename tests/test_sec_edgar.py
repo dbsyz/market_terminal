@@ -29,9 +29,11 @@ class StubSession:
     def __init__(self, payload) -> None:
         self.payload = payload
         self.request = None
+        self.request_count = 0
 
     def get(self, url, headers, timeout):
         self.request = (url, headers, timeout)
+        self.request_count += 1
         return StubResponse(self.payload)
 
 
@@ -124,6 +126,15 @@ class SecEdgarTests(unittest.TestCase):
         self.assertEqual(company.cik, "0000320193")
         self.assertEqual(session.request[1]["User-Agent"], DEFAULT_SEC_USER_AGENT)
         self.assertEqual(session.request[2], 15)
+
+    def test_client_caches_json_responses_by_url(self) -> None:
+        session = StubSession({"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}})
+        client = SecEdgarClient(session=session, min_request_interval=0)
+
+        self.assertIsNotNone(client.lookup_ticker("AAPL"))
+        self.assertIsNotNone(client.lookup_ticker("AAPL"))
+
+        self.assertEqual(session.request_count, 1)
 
     def test_formats_sec_company_context_for_chart_header(self) -> None:
         company = parse_company_tickers(

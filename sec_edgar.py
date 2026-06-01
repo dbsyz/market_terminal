@@ -84,6 +84,7 @@ class SecEdgarClient:
         self.session = session or requests.Session()
         self.min_request_interval = min_request_interval
         self._last_request_at = 0.0
+        self._json_cache: dict[str, dict[str, Any]] = {}
 
     def lookup_ticker(self, ticker: str) -> SecCompany | None:
         ticker_key = ticker.strip().upper()
@@ -137,6 +138,9 @@ class SecEdgarClient:
         return SecCompanyContext(company, fundamentals, filings)
 
     def _get_json(self, url: str) -> dict[str, Any]:
+        cached = self._json_cache.get(url)
+        if cached is not None:
+            return cached
         self._respect_rate_limit()
         response = self.session.get(
             url,
@@ -148,7 +152,9 @@ class SecEdgarClient:
             timeout=15,
         )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        self._json_cache[url] = payload
+        return payload
 
     def _respect_rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
