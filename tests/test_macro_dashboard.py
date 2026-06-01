@@ -51,6 +51,13 @@ class MacroDashboardTests(unittest.TestCase):
         self.assertTrue(snapshot.series)
         self.assertEqual(snapshot.series[0].latest_value, 4.25)
 
+    def test_service_exposes_curated_series_specs_without_fetching(self) -> None:
+        service = MacroDashboardService(fred=StubFred())
+
+        specs = service.series_specs("rates")
+
+        self.assertIn("DGS10", [spec.series_id for spec in specs])
+
     def test_formats_macro_snapshot(self) -> None:
         service = MacroDashboardService(fred=StubFred())
 

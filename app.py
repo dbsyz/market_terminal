@@ -863,6 +863,7 @@ class MarketTerminalApp(tk.Tk):
             "growth",
             "money",
             "credit",
+            command=lambda _value: self._populate_macro_placeholders(),
         )
         category_menu.configure(
             bg=GRID,
@@ -925,6 +926,7 @@ class MarketTerminalApp(tk.Tk):
         self.macro_resize_grip.bind("<ButtonPress-1>", self._start_macro_window_resize)
         self.macro_resize_grip.bind("<B1-Motion>", self._resize_macro_window)
         self.macro_resize_grip.bind("<ButtonRelease-1>", self._finish_macro_window_resize)
+        self._populate_macro_placeholders()
 
     def _add_watchlist_row(self, row: dict | None = None) -> None:
         item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
@@ -2190,12 +2192,30 @@ class MarketTerminalApp(tk.Tk):
 
     def refresh_macro_dashboard(self) -> None:
         category = self.macro_category_var.get()
+        if not self.macro_service.fred.enabled:
+            self._populate_macro_placeholders()
+            self.macro_status_var.set("Set FRED_API_KEY in the environment to load macro values.")
+            return
         self.macro_status_var.set(f"Loading FRED {category} series...")
         self.macro_tree.delete(*self.macro_tree.get_children())
         self._run_background(
             lambda: self.macro_service.snapshot(category, observation_start="2018-01-01"),
             self._update_macro_dashboard,
             "Macro request failed",
+        )
+
+    def _populate_macro_placeholders(self) -> None:
+        category = self.macro_category_var.get()
+        self.macro_tree.delete(*self.macro_tree.get_children())
+        specs = self.macro_service.series_specs(category)
+        for spec in specs:
+            self.macro_tree.insert(
+                "",
+                tk.END,
+                values=(spec.series_id, spec.title, "", "", ""),
+            )
+        self.macro_status_var.set(
+            f"{len(specs)} configured {category} FRED series. Refresh requires FRED_API_KEY."
         )
 
     def _update_macro_dashboard(self, snapshot: MacroDashboardSnapshot) -> None:

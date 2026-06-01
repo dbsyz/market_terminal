@@ -32,6 +32,9 @@ class MacroDashboardService:
     def __init__(self, fred: FredClient | None = None) -> None:
         self.fred = fred or FredClient()
 
+    def series_specs(self, category: str = "") -> tuple[FredSeriesSpec, ...]:
+        return curated_fred_series(category)
+
     def snapshot(
         self,
         category: str = "",
