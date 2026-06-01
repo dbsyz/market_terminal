@@ -65,7 +65,7 @@ class ProviderRegistryTests(unittest.TestCase):
     def test_marks_planned_sources_as_planned(self) -> None:
         health = _health_by_id()
 
-        self.assertEqual(health["fred"].status, STATUS_PLANNED)
+        self.assertEqual(health["ecb"].status, STATUS_PLANNED)
 
     def test_summary_is_human_readable(self) -> None:
         summary = provider_health_summary(include_planned=False)

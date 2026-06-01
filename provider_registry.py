@@ -106,9 +106,9 @@ PLANNED_PROVIDER_SPECS = (
         features=("macro", "rates", "economic_indicators"),
         asset_classes=("macro", "rates"),
         docs_url="https://fred.stlouisfed.org/docs/api/fred/",
-        implemented=False,
+        implemented=True,
         credential_env="FRED_API_KEY",
-        notes="Planned curated US macro/rates series integration.",
+        notes="Curated US macro/rates client foundation; requests require a free API key.",
     ),
     ProviderSpec(
         provider_id="ecb",

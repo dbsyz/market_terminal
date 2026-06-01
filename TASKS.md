@@ -2,7 +2,7 @@
 
 ## Active
 
-- Start FRED macro client foundation with curated series metadata.
+- Add macro dashboard data model and UI entry point for curated FRED series.
 
 ## Backlog
 
@@ -29,3 +29,4 @@
 - Added a richer SEC details popup with fundamentals, filings, and filing-link opening.
 - Added in-session and ignored disk caching for SEC EDGAR JSON responses.
 - Added SEC cache age display and clear-cache control.
+- Added `fred_macro.py` for FRED observations and curated macro/rates series metadata.
