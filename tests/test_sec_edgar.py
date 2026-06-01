@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from market_terminal.sec_edgar import (
     DEFAULT_SEC_USER_AGENT,
@@ -135,6 +137,29 @@ class SecEdgarTests(unittest.TestCase):
         self.assertIsNotNone(client.lookup_ticker("AAPL"))
 
         self.assertEqual(session.request_count, 1)
+
+    def test_client_uses_disk_cache_across_instances(self) -> None:
+        with TemporaryDirectory() as directory:
+            cache_dir = Path(directory)
+            first_session = StubSession(
+                {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+            )
+            first = SecEdgarClient(
+                session=first_session,
+                min_request_interval=0,
+                cache_dir=cache_dir,
+            )
+            self.assertIsNotNone(first.lookup_ticker("AAPL"))
+
+            second_session = StubSession({})
+            second = SecEdgarClient(
+                session=second_session,
+                min_request_interval=0,
+                cache_dir=cache_dir,
+            )
+
+            self.assertIsNotNone(second.lookup_ticker("AAPL"))
+            self.assertEqual(second_session.request_count, 0)
 
     def test_formats_sec_company_context_for_chart_header(self) -> None:
         company = parse_company_tickers(

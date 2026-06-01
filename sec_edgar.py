@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import time
+import json
+from hashlib import sha256
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -75,6 +78,8 @@ class SecEdgarClient:
         user_agent: str | None = None,
         session: requests.Session | None = None,
         min_request_interval: float = 0.11,
+        cache_dir: Path | None = None,
+        cache_ttl_seconds: int = 21_600,
     ) -> None:
         self.user_agent = (
             user_agent
@@ -85,6 +90,8 @@ class SecEdgarClient:
         self.min_request_interval = min_request_interval
         self._last_request_at = 0.0
         self._json_cache: dict[str, dict[str, Any]] = {}
+        self.cache_dir = cache_dir
+        self.cache_ttl_seconds = cache_ttl_seconds
 
     def lookup_ticker(self, ticker: str) -> SecCompany | None:
         ticker_key = ticker.strip().upper()
@@ -141,6 +148,10 @@ class SecEdgarClient:
         cached = self._json_cache.get(url)
         if cached is not None:
             return cached
+        disk_cached = self._read_disk_cache(url)
+        if disk_cached is not None:
+            self._json_cache[url] = disk_cached
+            return disk_cached
         self._respect_rate_limit()
         response = self.session.get(
             url,
@@ -154,7 +165,40 @@ class SecEdgarClient:
         response.raise_for_status()
         payload = response.json()
         self._json_cache[url] = payload
+        self._write_disk_cache(url, payload)
         return payload
+
+    def _read_disk_cache(self, url: str) -> dict[str, Any] | None:
+        path = self._cache_path(url)
+        if path is None:
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        fetched_at = float(payload.get("fetched_at", 0))
+        if time.time() - fetched_at > self.cache_ttl_seconds:
+            return None
+        data = payload.get("data")
+        return data if isinstance(data, dict) else None
+
+    def _write_disk_cache(self, url: str, data: dict[str, Any]) -> None:
+        path = self._cache_path(url)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"fetched_at": time.time(), "url": url, "data": data}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _cache_path(self, url: str) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / f"{sha256(url.encode('utf-8')).hexdigest()}.json"
 
     def _respect_rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_request_at

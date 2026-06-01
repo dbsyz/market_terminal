@@ -95,12 +95,12 @@ class MarketTerminalApp(tk.Tk):
     def __init__(self, provider: MarketDataProvider | None = None) -> None:
         super().__init__()
         self.provider = provider or MarketDataProvider()
-        self.sec_client = SecEdgarClient()
-        self.sec_context: SecCompanyContext | None = None
         self.title("Market Terminal | Price Charts")
         self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.configure(bg=BG)
         state_root = Path(__file__).resolve().parent / "out"
+        self.sec_client = SecEdgarClient(cache_dir=state_root / "sec_cache")
+        self.sec_context: SecCompanyContext | None = None
         self.window_state_path = state_root / "window_state.json"
         self.layout_state_path = state_root / "layout.json"
         self.watchlist_state_path = state_root / "watchlist.json"

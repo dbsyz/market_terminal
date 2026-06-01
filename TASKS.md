@@ -2,7 +2,7 @@
 
 ## Active
 
-- Add persistent SEC cache policy and cache invalidation controls.
+- Add SEC cache invalidation controls and visible cache age in the SEC details panel.
 
 ## Backlog
 
@@ -27,3 +27,4 @@
 - Kept the shared `test_venv` as the current working environment.
 - Added a manual UI smoke-test checklist to `PROJECT.md`.
 - Added a richer SEC details popup with fundamentals, filings, and filing-link opening.
+- Added in-session and ignored disk caching for SEC EDGAR JSON responses.
