@@ -96,7 +96,7 @@ volume.
 - Add SEC client with respectful headers. Done initially in `sec_edgar.py`.
 - Implement ticker-to-CIK mapping. Done initially via `SecEdgarClient.lookup_ticker()`.
 - Add company facts retrieval for a small curated field set. Done initially via `fundamental_snapshot()`.
-- Add recent filings list for selected ticker.
+- Add recent filings list for selected ticker. Initial chart-header context line is wired in `app.py`; a richer filings panel remains useful.
 - Add tests with recorded/minimal fixtures, not live network calls. Done initially in `tests/test_sec_edgar.py`.
 
 ### Milestone 3: Macro Data Backbone

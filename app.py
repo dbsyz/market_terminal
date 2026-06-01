@@ -31,6 +31,7 @@ from .models import (
 )
 from .provider_registry import provider_health_summary
 from .providers import MarketDataProvider
+from .sec_edgar import SecEdgarClient, format_sec_company_context
 
 
 BG = "#000000"
@@ -93,6 +94,7 @@ class MarketTerminalApp(tk.Tk):
     def __init__(self, provider: MarketDataProvider | None = None) -> None:
         super().__init__()
         self.provider = provider or MarketDataProvider()
+        self.sec_client = SecEdgarClient()
         self.title("Market Terminal | Price Charts")
         self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.configure(bg=BG)
@@ -114,6 +116,7 @@ class MarketTerminalApp(tk.Tk):
         )
         self.quote_var = tk.StringVar(value="Search for an asset to begin.")
         self.fundamentals_var = tk.StringVar(value="")
+        self.sec_context_var = tk.StringVar(value="")
         self.identity_var = tk.StringVar(value="")
         self.measurement_var = tk.StringVar(value="")
         self.session_var = tk.StringVar(value="")
@@ -395,6 +398,12 @@ class MarketTerminalApp(tk.Tk):
         ttk.Label(self.chart_panel, textvariable=self.fundamentals_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 4)
         )
+        ttk.Label(
+            self.chart_panel,
+            textvariable=self.sec_context_var,
+            style="Status.TLabel",
+            wraplength=1200,
+        ).pack(anchor=tk.W, pady=(0, 4))
         ttk.Label(self.chart_panel, textvariable=self.measurement_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 4)
         )
@@ -2135,6 +2144,7 @@ class MarketTerminalApp(tk.Tk):
         self.identity_var.set("")
         self.quote_var.set("Search for an asset to begin.")
         self.fundamentals_var.set("")
+        self.sec_context_var.set("")
         self.session_var.set("")
         self.hours_var.set("")
         self.status_var.set("Chart series cleared.")
@@ -2248,6 +2258,7 @@ class MarketTerminalApp(tk.Tk):
             f" | {len(instruments)} series | {view_label}"
         )
         self.fundamentals_var.set(instrument_fundamentals_text(primary))
+        self._refresh_sec_context(primary)
         ylabel = "Indexed (100)" if self.display_mode_var.get() == "Rebased 100" else "Price"
         self.price_axis.set_ylabel(ylabel, color=MUTED)
         self._draw_lower_panel(frame, primary.symbol)
@@ -2275,6 +2286,32 @@ class MarketTerminalApp(tk.Tk):
             + (f" + {technical_study_label(self.technical_study)}" if self.technical_study else "")
             + f" | Updated {datetime.now():%Y-%m-%d %H:%M:%S}"
         )
+
+    def _refresh_sec_context(self, instrument: Instrument) -> None:
+        symbol = instrument.symbol.strip().upper()
+        self.sec_context_var.set("")
+        if not symbol or symbol == "FORT_PNL" or any(marker in symbol for marker in ".=^/"):
+            return
+        request_id = self.chart_request_id
+        self.sec_context_var.set("SEC: loading filings and company facts...")
+
+        def load_context():
+            try:
+                return self.sec_client.company_context(symbol)
+            except Exception:
+                return None
+
+        self._run_background(
+            load_context,
+            lambda context: self._update_sec_context(request_id, context),
+            "SEC request failed",
+            lambda: request_id == self.chart_request_id,
+        )
+
+    def _update_sec_context(self, request_id: int, context) -> None:
+        if request_id != self.chart_request_id:
+            return
+        self.sec_context_var.set(format_sec_company_context(context) if context else "")
 
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
         if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):

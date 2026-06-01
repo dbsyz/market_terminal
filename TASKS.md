@@ -2,7 +2,7 @@
 
 ## Active
 
-- Expose SEC EDGAR company facts and recent filings in the selected-ticker workflow.
+- Add a richer SEC filings/fundamentals panel with clickable filing links and caching.
 - Initialize this folder as its own Git repository after reviewing the first standardized metadata pass.
 - Decide whether to keep using the shared `test_venv` or move to a project-local `.venv`.
 - Add a small smoke-test note for manual UI verification after chart or provider changes.
@@ -25,3 +25,4 @@
 - Added `provider_registry.py` for provider metadata and non-network health checks.
 - Exposed provider health/status reporting through the desktop app header.
 - Added `sec_edgar.py` for SEC ticker lookup, recent filing parsing, and XBRL company-facts snapshots.
+- Exposed SEC company facts and recent filings as a non-blocking selected-ticker context line.

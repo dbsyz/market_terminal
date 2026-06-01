@@ -62,6 +62,13 @@ class SecFundamentalSnapshot:
     facts: tuple[SecCompanyFact, ...]
 
 
+@dataclass(frozen=True)
+class SecCompanyContext:
+    company: SecCompany
+    fundamentals: SecFundamentalSnapshot
+    filings: tuple[SecFiling, ...]
+
+
 class SecEdgarClient:
     def __init__(
         self,
@@ -120,6 +127,14 @@ class SecEdgarClient:
                 selected.append(fact)
                 seen.add(key)
         return SecFundamentalSnapshot(snapshot.cik, snapshot.entity_name, tuple(selected))
+
+    def company_context(self, ticker: str, filing_limit: int = 3) -> SecCompanyContext | None:
+        company = self.lookup_ticker(ticker)
+        if company is None:
+            return None
+        fundamentals = self.fundamental_snapshot(company.cik)
+        filings = self.recent_filings(company.cik, limit=filing_limit)
+        return SecCompanyContext(company, fundamentals, filings)
 
     def _get_json(self, url: str) -> dict[str, Any]:
         self._respect_rate_limit()
@@ -256,3 +271,50 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def format_sec_company_context(context: SecCompanyContext) -> str:
+    facts = [_format_fact(fact) for fact in context.fundamentals.facts[:4]]
+    filings = [
+        f"{filing.form} {filing.filing_date}"
+        for filing in context.filings[:3]
+        if filing.form and filing.filing_date
+    ]
+    parts = [f"SEC: {context.company.ticker} CIK {context.company.cik}"]
+    if facts:
+        parts.append(" | ".join(facts))
+    if filings:
+        parts.append("Filings: " + ", ".join(filings))
+    return "  |  ".join(parts)
+
+
+def _format_fact(fact: SecCompanyFact) -> str:
+    label = _FACT_LABELS.get(fact.tag, fact.label or fact.tag)
+    value = _format_fact_value(fact.value)
+    period = fact.fiscal_period or fact.end
+    filed = f", filed {fact.filed}" if fact.filed else ""
+    return f"{label}: {value} {fact.unit} ({period}{filed})"
+
+
+def _format_fact_value(value: float | int | str) -> str:
+    if isinstance(value, (int, float)):
+        absolute = abs(float(value))
+        if absolute >= 1_000_000_000_000:
+            return f"{value / 1_000_000_000_000:.2f}T"
+        if absolute >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f}B"
+        if absolute >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
+        return f"{value:,.2f}"
+    return str(value)
+
+
+_FACT_LABELS = {
+    "Revenues": "Revenue",
+    "RevenueFromContractWithCustomerExcludingAssessedTax": "Revenue",
+    "NetIncomeLoss": "Net Income",
+    "Assets": "Assets",
+    "Liabilities": "Liabilities",
+    "StockholdersEquity": "Equity",
+    "EarningsPerShareDiluted": "Diluted EPS",
+}

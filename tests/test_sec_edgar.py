@@ -4,7 +4,9 @@ import unittest
 
 from market_terminal.sec_edgar import (
     DEFAULT_SEC_USER_AGENT,
+    SecCompanyContext,
     SecEdgarClient,
+    format_sec_company_context,
     normalize_cik,
     parse_company_facts,
     parse_company_tickers,
@@ -122,6 +124,54 @@ class SecEdgarTests(unittest.TestCase):
         self.assertEqual(company.cik, "0000320193")
         self.assertEqual(session.request[1]["User-Agent"], DEFAULT_SEC_USER_AGENT)
         self.assertEqual(session.request[2], 15)
+
+    def test_formats_sec_company_context_for_chart_header(self) -> None:
+        company = parse_company_tickers(
+            {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+        )[0]
+        fundamentals = parse_company_facts(
+            {
+                "cik": 320193,
+                "entityName": "Apple Inc.",
+                "facts": {
+                    "us-gaap": {
+                        "Revenues": {
+                            "label": "Revenues",
+                            "units": {
+                                "USD": [
+                                    {
+                                        "val": 390_000_000_000,
+                                        "end": "2025-12-31",
+                                        "filed": "2026-01-30",
+                                        "form": "10-K",
+                                        "fp": "FY",
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                },
+            }
+        )
+        filings = parse_recent_filings(
+            {
+                "cik": "320193",
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["0000320193-26-000001"],
+                        "form": ["10-K"],
+                        "filingDate": ["2026-01-30"],
+                        "primaryDocument": ["aapl-20251231.htm"],
+                    }
+                },
+            }
+        )
+
+        text = format_sec_company_context(SecCompanyContext(company, fundamentals, filings))
+
+        self.assertIn("SEC: AAPL CIK 0000320193", text)
+        self.assertIn("Revenue: 390.00B USD", text)
+        self.assertIn("Filings: 10-K 2026-01-30", text)
 
 
 if __name__ == "__main__":
