@@ -96,10 +96,6 @@ IMPLEMENTED_PROVIDER_SPECS = (
         credential_env="SEC_USER_AGENT",
         notes="Public SEC filings and XBRL facts; requires declared User-Agent and fair-access behavior.",
     ),
-)
-
-
-PLANNED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="fred",
         name="FRED",
@@ -108,8 +104,21 @@ PLANNED_PROVIDER_SPECS = (
         docs_url="https://fred.stlouisfed.org/docs/api/fred/",
         implemented=True,
         credential_env="FRED_API_KEY",
-        notes="Curated US macro/rates client foundation; requests require a free API key.",
+        notes="Curated US macro/rates client foundation; public CSV fallback works without a key.",
     ),
+    ProviderSpec(
+        provider_id="gdelt",
+        name="GDELT DOC API",
+        features=("news_search", "topic_monitoring"),
+        asset_classes=("news", "macro"),
+        docs_url="https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/",
+        implemented=True,
+        notes="Free global news discovery source; requires ranking/noise filtering for finance workflows.",
+    ),
+)
+
+
+PLANNED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="ecb",
         name="ECB Data Portal",
@@ -118,15 +127,6 @@ PLANNED_PROVIDER_SPECS = (
         docs_url="https://data.ecb.europa.eu/help/api/overview",
         implemented=False,
         notes="Planned euro-area SDMX macro/rates integration.",
-    ),
-    ProviderSpec(
-        provider_id="gdelt",
-        name="GDELT DOC API",
-        features=("news_search", "topic_monitoring"),
-        asset_classes=("news", "macro"),
-        docs_url="https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/",
-        implemented=False,
-        notes="Planned free global news discovery source; requires ranking/noise filtering.",
     ),
 )
 

@@ -25,7 +25,9 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertIn("yahoo", [spec.provider_id for spec in specs])
         self.assertIn("sec_edgar", [spec.provider_id for spec in specs])
         self.assertIn("fred", [spec.provider_id for spec in specs])
+        self.assertIn("gdelt", [spec.provider_id for spec in specs])
         self.assertTrue(next(spec for spec in specs if spec.provider_id == "sec_edgar").implemented)
+        self.assertTrue(next(spec for spec in specs if spec.provider_id == "gdelt").implemented)
 
     def test_marks_keyless_openfigi_as_limited_not_disabled(self) -> None:
         with patch.dict(os.environ, {"OPENFIGI_API_KEY": ""}, clear=False):

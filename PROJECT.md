@@ -93,9 +93,8 @@ Minimum smoke path:
 - Search and open `AAPL`.
 - Confirm the chart renders, the status bar shows a data source, and the app remains responsive.
 - Click `DATA STATUS` and confirm a provider status dialog opens.
-- In the `MACRO` window, select a category and click `REFRESH`; it should populate
-  latest macro values via FRED public CSV, or via the JSON API when `FRED_API_KEY`
-  is configured.
+- In the `NEWS` window, click `REFRESH`; it should populate recent GDELT headlines
+  and double-clicking a row should open the article URL.
 - For a US equity, confirm the SEC context line either loads facts/filings or stays non-blocking if SEC is unavailable.
 - Add one comparison series, then remove it.
 - Save layout and close/reopen if layout behavior changed.

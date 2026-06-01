@@ -31,6 +31,7 @@ from .models import (
     RangeSpec,
 )
 from .macro_dashboard import MacroDashboardService, MacroDashboardSnapshot
+from .news_feed import GdeltNewsClient, NewsArticle, default_news_queries, news_query_by_label
 from .provider_registry import provider_health_summary
 from .providers import MarketDataProvider
 from .sec_edgar import SecCompanyContext, SecEdgarClient, format_sec_company_context
@@ -74,6 +75,8 @@ MIN_CHART_WINDOW_WIDTH = 620
 MIN_CHART_WINDOW_HEIGHT = 420
 MIN_MACRO_WINDOW_WIDTH = 520
 MIN_MACRO_WINDOW_HEIGHT = 320
+MIN_NEWS_WINDOW_WIDTH = 620
+MIN_NEWS_WINDOW_HEIGHT = 360
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ class MarketTerminalApp(tk.Tk):
         super().__init__()
         self.provider = provider or MarketDataProvider()
         self.macro_service = MacroDashboardService()
+        self.news_client = GdeltNewsClient()
         self.title("Market Terminal | Price Charts")
         self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.configure(bg=BG)
@@ -142,6 +146,8 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_group_var = tk.StringVar(value="A")
         self.macro_category_var = tk.StringVar(value="rates")
         self.macro_status_var = tk.StringVar(value="FRED macro dashboard")
+        self.news_topic_var = tk.StringVar(value="Markets")
+        self.news_status_var = tk.StringVar(value="Live news via GDELT")
         self.search_action_var = tk.StringVar(value="OPEN SECURITY")
         self.search_sort_var = tk.StringVar(value="Relevance")
         self.exchange_filter_var = tk.StringVar(value="All Markets")
@@ -418,9 +424,10 @@ class MarketTerminalApp(tk.Tk):
         self._build_suggestion_popup()
         self._build_watchlist_window()
         self._build_macro_window()
+        self._build_news_window()
         self.after_idle(self._layout_initial_workspace_windows)
         self.after_idle(self.refresh_watchlist)
-        self.after(450, self.refresh_macro_dashboard)
+        self.after(650, self.refresh_news_feed)
 
     def _layout_initial_workspace_windows(self) -> None:
         self.desktop.update_idletasks()
@@ -442,12 +449,13 @@ class MarketTerminalApp(tk.Tk):
             height=min(height, 520),
         )
         self.chart_window.place_configure(x=watch_width + 10, y=0, width=chart_width, height=height)
-        self.macro_window.place_configure(
-            x=0,
-            y=min(height - macro_height, 530),
-            width=watch_width,
-            height=macro_height,
+        self.news_window.place_configure(
+            x=watch_width + 10,
+            y=max(0, height - min(360, height)),
+            width=chart_width,
+            height=min(360, height),
         )
+        self.macro_window.place_forget()
         self._mark_layout_saved_snapshot()
 
     def _restore_saved_function_layout(self) -> bool:
@@ -457,7 +465,7 @@ class MarketTerminalApp(tk.Tk):
         for name, widget, minimum_width, minimum_height in (
             ("watchlist", self.watchlist_window, 360, 260),
             ("chart", self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT),
-            ("macro", self.macro_window, MIN_MACRO_WINDOW_WIDTH, MIN_MACRO_WINDOW_HEIGHT),
+            ("news", self.news_window, MIN_NEWS_WINDOW_WIDTH, MIN_NEWS_WINDOW_HEIGHT),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
@@ -470,7 +478,7 @@ class MarketTerminalApp(tk.Tk):
             restored = True
         self._constrain_chart_window_to_desktop(None)
         self._constrain_watchlist_window_to_desktop()
-        self._constrain_macro_window_to_desktop()
+        self._constrain_news_window_to_desktop()
         self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
 
@@ -478,7 +486,7 @@ class MarketTerminalApp(tk.Tk):
         for name, widget in (
             ("watchlist", self.watchlist_window),
             ("chart", self.chart_window),
-            ("macro", self.macro_window),
+            ("news", self.news_window),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
@@ -599,6 +607,8 @@ class MarketTerminalApp(tk.Tk):
             self._constrain_watchlist_window_to_desktop()
         if hasattr(self, "macro_window"):
             self._constrain_macro_window_to_desktop()
+        if hasattr(self, "news_window"):
+            self._constrain_news_window_to_desktop()
 
     def _constrain_watchlist_window_to_desktop(self) -> None:
         if self.desktop.winfo_width() < 360 or self.desktop.winfo_height() < 260:
@@ -621,6 +631,17 @@ class MarketTerminalApp(tk.Tk):
         width = min(max(self.macro_window.winfo_width(), MIN_MACRO_WINDOW_WIDTH), desktop_width - left)
         height = min(max(self.macro_window.winfo_height(), MIN_MACRO_WINDOW_HEIGHT), desktop_height - top)
         self.macro_window.place_configure(x=left, y=top, width=width, height=height)
+
+    def _constrain_news_window_to_desktop(self) -> None:
+        if self.desktop.winfo_width() < MIN_NEWS_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_NEWS_WINDOW_HEIGHT:
+            return
+        desktop_width = max(self.desktop.winfo_width(), MIN_NEWS_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_NEWS_WINDOW_HEIGHT)
+        left = max(0, min(self.news_window.winfo_x(), max(desktop_width - MIN_NEWS_WINDOW_WIDTH, 0)))
+        top = max(0, min(self.news_window.winfo_y(), max(desktop_height - MIN_NEWS_WINDOW_HEIGHT, 0)))
+        width = min(max(self.news_window.winfo_width(), MIN_NEWS_WINDOW_WIDTH), desktop_width - left)
+        height = min(max(self.news_window.winfo_height(), MIN_NEWS_WINDOW_HEIGHT), desktop_height - top)
+        self.news_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _start_watchlist_window_drag(self, event: tk.Event) -> str:
         self.watchlist_window.lift()
@@ -738,6 +759,66 @@ class MarketTerminalApp(tk.Tk):
         return "break"
 
     def _finish_macro_window_resize(self, _event: tk.Event) -> str:
+        self.floating_window_resize = None
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _start_news_window_drag(self, event: tk.Event) -> str:
+        self.news_window.lift()
+        self.floating_window_drag = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "left": self.news_window.winfo_x(),
+            "top": self.news_window.winfo_y(),
+        }
+        return "break"
+
+    def _drag_news_window(self, event: tk.Event) -> str:
+        if not self.floating_window_drag:
+            return "break"
+        desktop_width = max(self.desktop.winfo_width(), MIN_NEWS_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_NEWS_WINDOW_HEIGHT)
+        width = self.news_window.winfo_width()
+        height = self.news_window.winfo_height()
+        left = self.floating_window_drag["left"] + event.x_root - self.floating_window_drag["x"]
+        top = self.floating_window_drag["top"] + event.y_root - self.floating_window_drag["y"]
+        left = max(0, min(left, max(desktop_width - width, 0)))
+        top = max(0, min(top, max(desktop_height - height, 0)))
+        self.news_window.place_configure(x=left, y=top)
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _finish_news_window_drag(self, _event: tk.Event) -> str:
+        self.floating_window_drag = None
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _start_news_window_resize(self, event: tk.Event) -> str:
+        self.news_window.lift()
+        self.floating_window_resize = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "width": self.news_window.winfo_width(),
+            "height": self.news_window.winfo_height(),
+        }
+        return "break"
+
+    def _resize_news_window(self, event: tk.Event) -> str:
+        if not self.floating_window_resize:
+            return "break"
+        left = self.news_window.winfo_x()
+        top = self.news_window.winfo_y()
+        desktop_width = max(self.desktop.winfo_width(), MIN_NEWS_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_NEWS_WINDOW_HEIGHT)
+        width = self.floating_window_resize["width"] + event.x_root - self.floating_window_resize["x"]
+        height = self.floating_window_resize["height"] + event.y_root - self.floating_window_resize["y"]
+        width = max(MIN_NEWS_WINDOW_WIDTH, min(width, max(desktop_width - left, MIN_NEWS_WINDOW_WIDTH)))
+        height = max(MIN_NEWS_WINDOW_HEIGHT, min(height, max(desktop_height - top, MIN_NEWS_WINDOW_HEIGHT)))
+        self.news_window.place_configure(width=width, height=height)
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _finish_news_window_resize(self, _event: tk.Event) -> str:
         self.floating_window_resize = None
         self._mark_layout_dirty_if_changed()
         return "break"
@@ -928,6 +1009,97 @@ class MarketTerminalApp(tk.Tk):
         self.macro_resize_grip.bind("<B1-Motion>", self._resize_macro_window)
         self.macro_resize_grip.bind("<ButtonRelease-1>", self._finish_macro_window_resize)
         self._populate_macro_placeholders()
+
+    def _build_news_window(self) -> None:
+        self.news_window = tk.Frame(
+            self.desktop,
+            bg=PANEL,
+            highlightbackground=GRID,
+            highlightthickness=1,
+        )
+        self.news_window.place(x=460, y=520, width=820, height=360)
+        self.news_titlebar = tk.Frame(self.news_window, bg=GRID, height=28, cursor="fleur")
+        self.news_titlebar.pack(fill=tk.X)
+        self.news_titlebar.pack_propagate(False)
+        label = tk.Label(
+            self.news_titlebar,
+            text="NEWS",
+            bg=GRID,
+            fg=TEXT,
+            font=("Segoe UI", 9, "bold"),
+            padx=9,
+        )
+        label.pack(side=tk.LEFT)
+        for widget in (self.news_titlebar, label):
+            widget.bind("<ButtonPress-1>", self._start_news_window_drag)
+            widget.bind("<B1-Motion>", self._drag_news_window)
+            widget.bind("<ButtonRelease-1>", self._finish_news_window_drag)
+        topic_menu = tk.OptionMenu(
+            self.news_titlebar,
+            self.news_topic_var,
+            *tuple(query.label for query in default_news_queries()),
+        )
+        topic_menu.configure(
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=6,
+            pady=0,
+            highlightthickness=0,
+        )
+        topic_menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
+        topic_menu.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        tk.Button(
+            self.news_titlebar,
+            text="REFRESH",
+            command=self.refresh_news_feed,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        content = ttk.Frame(self.news_window, style="Panel.TFrame", padding=7)
+        content.pack(fill=tk.BOTH, expand=True)
+        self.news_tree = ttk.Treeview(
+            content,
+            columns=("time", "source", "title", "domain"),
+            show="headings",
+            height=9,
+        )
+        for column, title, width in (
+            ("time", "Seen", 115),
+            ("source", "Source", 95),
+            ("title", "Headline", 460),
+            ("domain", "Domain", 150),
+        ):
+            self.news_tree.heading(column, text=title)
+            self.news_tree.column(column, width=width, anchor=tk.W)
+        self.news_tree.pack(fill=tk.BOTH, expand=True)
+        self.news_tree.bind("<Double-Button-1>", self._open_selected_news_article)
+        ttk.Label(
+            content,
+            textvariable=self.news_status_var,
+            style="Status.TLabel",
+            padding=(0, 6),
+        ).pack(fill=tk.X)
+        self.news_resize_grip = tk.Frame(
+            self.news_window,
+            bg=ORANGE,
+            width=15,
+            height=15,
+            cursor="size_nw_se",
+        )
+        self.news_resize_grip.place(relx=1.0, rely=1.0, anchor=tk.SE)
+        self.news_resize_grip.bind("<ButtonPress-1>", self._start_news_window_resize)
+        self.news_resize_grip.bind("<B1-Motion>", self._resize_news_window)
+        self.news_resize_grip.bind("<ButtonRelease-1>", self._finish_news_window_resize)
 
     def _add_watchlist_row(self, row: dict | None = None) -> None:
         item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
@@ -1134,6 +1306,7 @@ class MarketTerminalApp(tk.Tk):
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
             "macro": window_place_geometry(self.macro_window),
+            "news": window_place_geometry(self.news_window),
         }
         save_layout_state(self.layout_state_path, layout)
         self.saved_layout_state = layout
@@ -1154,6 +1327,7 @@ class MarketTerminalApp(tk.Tk):
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
             "macro": window_place_geometry(self.macro_window),
+            "news": window_place_geometry(self.news_window),
         }
 
     def _mark_layout_saved_snapshot(self) -> None:
@@ -2233,6 +2407,42 @@ class MarketTerminalApp(tk.Tk):
         self.macro_status_var.set(
             f"{len(snapshot.series)} {snapshot.category} series via {snapshot.source}."
         )
+
+    def refresh_news_feed(self) -> None:
+        query = news_query_by_label(self.news_topic_var.get())
+        self.news_status_var.set(f"Loading {query.label} news via GDELT...")
+        self.news_tree.delete(*self.news_tree.get_children())
+        self._run_background(
+            lambda: self.news_client.search(query),
+            lambda articles: self._update_news_feed(query.label, articles),
+            "News request failed",
+        )
+
+    def _update_news_feed(self, label: str, articles: tuple[NewsArticle, ...]) -> None:
+        self.news_tree.delete(*self.news_tree.get_children())
+        self.news_articles = articles
+        for index, article in enumerate(articles):
+            self.news_tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    article.published_at,
+                    article.source or article.language,
+                    article.title,
+                    article.domain,
+                ),
+            )
+        self.news_status_var.set(f"{len(articles)} {label} articles via GDELT. Double-click to open.")
+
+    def _open_selected_news_article(self, _event: tk.Event | None = None) -> str:
+        selected = self.news_tree.selection()
+        if not selected or not hasattr(self, "news_articles"):
+            return "break"
+        article = self.news_articles[int(selected[0])]
+        webbrowser.open(article.url)
+        self.news_status_var.set(f"Opened: {article.title[:90]}")
+        return "break"
 
     def _save_watchlist_state(self) -> None:
         rows = []

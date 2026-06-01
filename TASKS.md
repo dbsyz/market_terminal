@@ -2,12 +2,11 @@
 
 ## Active
 
-- Improve Macro function window with sparkline/charting and provider/cache status.
+- Improve News function window with auto-refresh controls, ticker-linked queries, and ranking/noise filters.
 
 ## Backlog
 
 - Add FRED and ECB macro clients with curated series packs.
-- Add GDELT-based ticker/macro news monitoring with noise filtering.
 - Evaluate Telegram alerts versus responsive local web UI as the first phone-friendly monitor surface.
 - Consider moving source files into a package layout only if packaging/distribution becomes a real need.
 - Add a concise architecture section covering app, provider, and model responsibilities.
@@ -32,3 +31,5 @@
 - Added `fred_macro.py` for FRED observations and curated macro/rates series metadata.
 - Added `macro_dashboard.py` for UI-independent macro dashboard snapshots.
 - Added a floating Macro function window for curated FRED categories.
+- Hid the Macro function from the default workspace while keeping the service code.
+- Added a floating News function window backed by the GDELT DOC API.

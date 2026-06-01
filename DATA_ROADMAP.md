@@ -54,7 +54,7 @@ These are architecture tasks needed before adding many more feeds.
 | World Bank Indicators API | Global country macro/development indicators | Broad international macro context | No key | Good for slower-moving country dashboards, not real-time markets. |
 | IMF Data APIs | Global macro, WEO/IFS-style datasets | Global macro and country comparisons | API availability varies by dataset | Use after FRED/ECB/World Bank because SDMX metadata discovery needs careful UX. |
 | EIA Open Data API | Energy supply, demand, inventories, prices | Commodity and energy macro dashboard | Free API key may be required for some usage | High value for oil, gas, electricity, and energy-sensitive assets. |
-| GDELT DOC API | Global news search and topic monitoring | Free large-scale news monitoring and macro/ticker narrative discovery | No key | Needs filtering/ranking to avoid noisy results. Use as a news-discovery source, not polished financial news by itself. |
+| GDELT DOC API | Global news search and topic monitoring | Free large-scale news monitoring and macro/ticker narrative discovery | No key | Initial live news client/window exists via `news_feed.py` and `app.py`; ranking/noise filtering remains important. |
 
 ## Priority 2: Free-Tier Market Data Candidates
 
@@ -77,7 +77,7 @@ volume.
 | Charting | Yahoo/yfinance, Stooq fallback | Alpha Vantage daily, Twelve Data where free tier allows |
 | Live selected ticker pricing | Yahoo/yfinance quote metadata first | Finnhub/Twelve Data only after free-tier validation |
 | Portfolio analysis | Local portfolio files, Yahoo/yfinance bars | SEC fundamentals, FRED/ECB macro overlays |
-| News section | GDELT DOC API, Finnhub company news if available | NewsAPI for development experiments |
+| News section | GDELT DOC API via `news_feed.py`, Finnhub company news if available | NewsAPI for development experiments |
 | AI quick analysis | Local computed indicators, provider provenance, SEC facts, filings, macro series, news snippets | LLM-backed synthesis after source grounding is reliable |
 | Macro dashboard | FRED, ECB, Treasury Fiscal Data, World Bank | IMF, EIA |
 | Mobile monitor | Same provider services behind a UI-agnostic layer | Telegram alerts, responsive web, native mobile experiments |
@@ -108,7 +108,7 @@ volume.
 
 ### Milestone 4: News Monitoring
 
-- Add GDELT news search client.
+- Add GDELT news search client. Done initially in `news_feed.py`.
 - Build ticker/macro query templates.
 - Rank/filter noisy articles.
 - Feed only sourced snippets and metadata into AI analysis.
