@@ -70,6 +70,7 @@ class SecCompanyContext:
     company: SecCompany
     fundamentals: SecFundamentalSnapshot
     filings: tuple[SecFiling, ...]
+    fetched_at: float = 0.0
 
 
 class SecEdgarClient:
@@ -90,6 +91,7 @@ class SecEdgarClient:
         self.min_request_interval = min_request_interval
         self._last_request_at = 0.0
         self._json_cache: dict[str, dict[str, Any]] = {}
+        self._json_cache_fetched_at: dict[str, float] = {}
         self.cache_dir = cache_dir
         self.cache_ttl_seconds = cache_ttl_seconds
 
@@ -142,7 +144,19 @@ class SecEdgarClient:
             return None
         fundamentals = self.fundamental_snapshot(company.cik)
         filings = self.recent_filings(company.cik, limit=filing_limit)
-        return SecCompanyContext(company, fundamentals, filings)
+        fetched_at = self._context_fetched_at(company.cik)
+        return SecCompanyContext(company, fundamentals, filings, fetched_at)
+
+    def clear_cache(self) -> None:
+        self._json_cache.clear()
+        self._json_cache_fetched_at.clear()
+        if self.cache_dir is None:
+            return
+        try:
+            for path in self.cache_dir.glob("*.json"):
+                path.unlink()
+        except OSError:
+            pass
 
     def _get_json(self, url: str) -> dict[str, Any]:
         cached = self._json_cache.get(url)
@@ -150,8 +164,10 @@ class SecEdgarClient:
             return cached
         disk_cached = self._read_disk_cache(url)
         if disk_cached is not None:
-            self._json_cache[url] = disk_cached
-            return disk_cached
+            data, fetched_at = disk_cached
+            self._json_cache[url] = data
+            self._json_cache_fetched_at[url] = fetched_at
+            return data
         self._respect_rate_limit()
         response = self.session.get(
             url,
@@ -164,11 +180,13 @@ class SecEdgarClient:
         )
         response.raise_for_status()
         payload = response.json()
+        fetched_at = time.time()
         self._json_cache[url] = payload
+        self._json_cache_fetched_at[url] = fetched_at
         self._write_disk_cache(url, payload)
         return payload
 
-    def _read_disk_cache(self, url: str) -> dict[str, Any] | None:
+    def _read_disk_cache(self, url: str) -> tuple[dict[str, Any], float] | None:
         path = self._cache_path(url)
         if path is None:
             return None
@@ -180,7 +198,7 @@ class SecEdgarClient:
         if time.time() - fetched_at > self.cache_ttl_seconds:
             return None
         data = payload.get("data")
-        return data if isinstance(data, dict) else None
+        return (data, fetched_at) if isinstance(data, dict) else None
 
     def _write_disk_cache(self, url: str, data: dict[str, Any]) -> None:
         path = self._cache_path(url)
@@ -199,6 +217,15 @@ class SecEdgarClient:
         if self.cache_dir is None:
             return None
         return self.cache_dir / f"{sha256(url.encode('utf-8')).hexdigest()}.json"
+
+    def _context_fetched_at(self, cik: str) -> float:
+        urls = (
+            SEC_COMPANY_TICKERS_URL,
+            SEC_COMPANY_FACTS_URL.format(cik=normalize_cik(cik)),
+            SEC_SUBMISSIONS_URL.format(cik=normalize_cik(cik)),
+        )
+        times = [self._json_cache_fetched_at[url] for url in urls if url in self._json_cache_fetched_at]
+        return min(times) if times else 0.0
 
     def _respect_rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
@@ -335,7 +362,19 @@ def format_sec_company_context(context: SecCompanyContext) -> str:
         parts.append(" | ".join(facts))
     if filings:
         parts.append("Filings: " + ", ".join(filings))
+    if context.fetched_at:
+        parts.append("Cache age: " + format_cache_age(context.fetched_at))
     return "  |  ".join(parts)
+
+
+def format_cache_age(fetched_at: float, now: float | None = None) -> str:
+    current = time.time() if now is None else now
+    age = max(0, int(current - fetched_at))
+    if age < 60:
+        return f"{age}s"
+    if age < 3_600:
+        return f"{age // 60}m"
+    return f"{age // 3_600}h"
 
 
 def _format_fact(fact: SecCompanyFact) -> str:

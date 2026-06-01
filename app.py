@@ -2410,13 +2410,29 @@ class MarketTerminalApp(tk.Tk):
             webbrowser.open(filing.filing_url)
             self.status_var.set(f"Opened SEC filing {filing.form} {filing.filing_date}.")
 
+        def clear_sec_cache() -> None:
+            self.sec_client.clear_cache()
+            self.sec_context = None
+            self.sec_context_var.set("")
+            self.sec_details_button.state(["disabled"])
+            window.destroy()
+            self.status_var.set("SEC cache cleared. Reload the chart to fetch fresh SEC data.")
+
         filings.bind("<Double-1>", lambda _event: open_selected_filing())
+        actions = ttk.Frame(window, padding=(12, 0, 12, 12))
+        actions.pack(fill=tk.X)
         ttk.Button(
-            window,
+            actions,
+            text="CLEAR SEC CACHE",
+            style="Chip.TButton",
+            command=clear_sec_cache,
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            actions,
             text="OPEN SELECTED FILING",
             style="Accent.TButton",
             command=open_selected_filing,
-        ).pack(anchor=tk.E, padx=12, pady=(0, 12))
+        ).pack(side=tk.RIGHT)
 
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
         if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):

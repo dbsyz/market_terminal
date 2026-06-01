@@ -8,6 +8,7 @@ from market_terminal.sec_edgar import (
     DEFAULT_SEC_USER_AGENT,
     SecCompanyContext,
     SecEdgarClient,
+    format_cache_age,
     format_sec_company_context,
     normalize_cik,
     parse_company_facts,
@@ -161,6 +162,29 @@ class SecEdgarTests(unittest.TestCase):
             self.assertIsNotNone(second.lookup_ticker("AAPL"))
             self.assertEqual(second_session.request_count, 0)
 
+    def test_clear_cache_removes_memory_and_disk_cache(self) -> None:
+        with TemporaryDirectory() as directory:
+            session = StubSession(
+                {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+            )
+            client = SecEdgarClient(
+                session=session,
+                min_request_interval=0,
+                cache_dir=Path(directory),
+            )
+            self.assertIsNotNone(client.lookup_ticker("AAPL"))
+            self.assertTrue(list(Path(directory).glob("*.json")))
+
+            client.clear_cache()
+
+            self.assertFalse(client._json_cache)
+            self.assertFalse(list(Path(directory).glob("*.json")))
+
+    def test_formats_cache_age(self) -> None:
+        self.assertEqual(format_cache_age(100.0, now=105.0), "5s")
+        self.assertEqual(format_cache_age(100.0, now=250.0), "2m")
+        self.assertEqual(format_cache_age(100.0, now=7_400.0), "2h")
+
     def test_formats_sec_company_context_for_chart_header(self) -> None:
         company = parse_company_tickers(
             {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
@@ -203,11 +227,14 @@ class SecEdgarTests(unittest.TestCase):
             }
         )
 
-        text = format_sec_company_context(SecCompanyContext(company, fundamentals, filings))
+        text = format_sec_company_context(
+            SecCompanyContext(company, fundamentals, filings, fetched_at=100.0)
+        )
 
         self.assertIn("SEC: AAPL CIK 0000320193", text)
         self.assertIn("Revenue: 390.00B USD", text)
         self.assertIn("Filings: 10-K 2026-01-30", text)
+        self.assertIn("Cache age:", text)
 
 
 if __name__ == "__main__":

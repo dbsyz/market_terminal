@@ -2,7 +2,7 @@
 
 ## Active
 
-- Add SEC cache invalidation controls and visible cache age in the SEC details panel.
+- Start FRED macro client foundation with curated series metadata.
 
 ## Backlog
 
@@ -28,3 +28,4 @@
 - Added a manual UI smoke-test checklist to `PROJECT.md`.
 - Added a richer SEC details popup with fundamentals, filings, and filing-link opening.
 - Added in-session and ignored disk caching for SEC EDGAR JSON responses.
+- Added SEC cache age display and clear-cache control.
