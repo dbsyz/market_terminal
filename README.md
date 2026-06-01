@@ -96,6 +96,25 @@ python market_terminal\run.py
 Enter examples such as `AAPL`, `Apple`, `EURUSD=X`, `BTC-USD`,
 `US0378331005` (ISIN), `037833100` (CUSIP), or `FORT_PNL`.
 
+## Agentic Loop
+
+`market_terminal.agent_loop` provides a reusable observe-act-reflect process
+for market review workflows. It uses the existing `MarketDataProvider` to
+search instruments, fetch history, build observations, reflect after each
+step, and synthesize a compact review.
+
+```python
+from market_terminal.agent_loop import AgentLoopTask, AgenticMarketLoop
+
+result = AgenticMarketLoop().run(
+    AgentLoopTask("Review portfolio leaders", ("AAPL", "MSFT", "FORT_PNL"))
+)
+print(result.final_answer)
+```
+
+Use `iter_events()` instead of `run()` when wiring the loop into a UI,
+scheduler, or streaming process.
+
 ## Local Portfolio Index
 
 `FORT_PNL` is a local custom index sourced from:
