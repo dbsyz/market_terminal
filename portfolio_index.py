@@ -39,6 +39,18 @@ class PortfolioIndexFiles:
     full_trades: Path
 
 
+@dataclass(frozen=True)
+class PortfolioConstituentQuote:
+    ticker: str
+    yahoo_symbol: str
+    name: str
+    weight_pct: float
+    last_price: float | None
+    last_updated: str
+    snapshot_price: float | None
+    snapshot_date: str
+
+
 def portfolio_index_files() -> PortfolioIndexFiles:
     out_dir = Path(os.getenv("FORT_PNL_OUT_DIR", str(DEFAULT_PORTFOLIO_OUT_DIR)))
     return PortfolioIndexFiles(
@@ -163,6 +175,39 @@ def build_portfolio_monitor_report() -> str:
     return "\n".join(report).strip() + "\n"
 
 
+def portfolio_constituent_quotes(lookback_days: int = 10) -> tuple[PortfolioConstituentQuote, ...]:
+    files = portfolio_index_files()
+    constituents = _read_constituents(files.constituents)
+    end = _current_date()
+    start = end - pd.Timedelta(days=lookback_days)
+    symbols = sorted(
+        {
+            _portfolio_yahoo_symbol(str(row.ticker).strip())
+            for row in constituents.itertuples()
+            if _portfolio_yahoo_symbol(str(row.ticker).strip())
+        }
+    )
+    closes = _download_constituent_closes(symbols, start, end) if symbols else pd.DataFrame()
+    quotes = []
+    for row in constituents.sort_values("weight_pct", ascending=False).itertuples():
+        ticker = str(row.ticker).strip()
+        yahoo_symbol = _portfolio_yahoo_symbol(ticker)
+        latest = _latest_close(closes[yahoo_symbol]) if yahoo_symbol in closes else None
+        quotes.append(
+            PortfolioConstituentQuote(
+                ticker=ticker,
+                yahoo_symbol=yahoo_symbol,
+                name=str(row.name).strip(),
+                weight_pct=float(row.weight_pct),
+                last_price=latest[1] if latest else None,
+                last_updated=_format_price_timestamp(latest[0]) if latest else "",
+                snapshot_price=_as_optional_float(getattr(row, "price", None)),
+                snapshot_date=str(getattr(row, "as_of_date", "")).strip(),
+            )
+        )
+    return tuple(quotes)
+
+
 def _portfolio_market_value() -> float | None:
     try:
         summary = _read_summary(portfolio_index_files().summary)
@@ -175,10 +220,11 @@ def _build_current_weight_index_history(
     files: PortfolioIndexFiles, levels: pd.DataFrame
 ) -> pd.DataFrame:
     constituents = _read_constituents(files.constituents)
-    as_of = pd.to_datetime(levels["date"]).max()
-    start = _first_trade_date(files) or pd.Timestamp(f"{as_of.year}-01-01")
+    snapshot_date = pd.to_datetime(levels["date"]).max().normalize()
+    live_end = max(snapshot_date, _current_date())
+    start = _first_trade_date(files) or pd.Timestamp(f"{snapshot_date.year}-01-01")
     latest_level = _latest_numeric(levels, "index_level")
-    weighted_prices = _download_weighted_constituent_prices(constituents, start, as_of)
+    weighted_prices = _download_weighted_constituent_prices(constituents, start, live_end)
     if weighted_prices.empty:
         return pd.DataFrame()
     normalized = weighted_prices / weighted_prices.iloc[0]
@@ -186,11 +232,14 @@ def _build_current_weight_index_history(
     if raw_path.empty or not float(raw_path.iloc[0]):
         return pd.DataFrame()
     raw_return = raw_path / float(raw_path.iloc[0])
-    total_return = float(raw_return.iloc[-1] - 1)
-    if abs(total_return) < 1e-12:
-        index_path = pd.Series(BASE_LEVEL, index=raw_path.index)
+    snapshot_return = _latest_at_or_before(raw_return, snapshot_date)
+    if snapshot_return is None:
+        snapshot_return = float(raw_return.iloc[-1])
+    snapshot_total_return = float(snapshot_return - 1)
+    if abs(snapshot_total_return) < 1e-12:
+        index_path = latest_level * raw_return / float(snapshot_return or 1)
     else:
-        scaled_progress = (raw_return - 1) / total_return
+        scaled_progress = (raw_return - 1) / snapshot_total_return
         index_path = BASE_LEVEL + scaled_progress * (latest_level - BASE_LEVEL)
     frame = pd.DataFrame(
         {
@@ -203,8 +252,25 @@ def _build_current_weight_index_history(
         index=index_path.index,
     )
     frame = _attach_trade_cash_columns(frame, files)
-    frame.attrs["data_source"] = "FORT_PNL synthesized current-weight constituent history"
+    if frame.index.max().normalize() > snapshot_date:
+        frame.attrs["data_source"] = (
+            "FORT_PNL live-estimated current-weight constituent history via Yahoo Finance"
+        )
+    else:
+        frame.attrs["data_source"] = "FORT_PNL synthesized current-weight constituent history"
+    frame.attrs["portfolio_snapshot_date"] = snapshot_date.date().isoformat()
     return frame.dropna(subset=["Close"])
+
+
+def _current_date() -> pd.Timestamp:
+    return pd.Timestamp.today().normalize()
+
+
+def _latest_at_or_before(series: pd.Series, date: pd.Timestamp) -> float | None:
+    values = series.loc[series.index <= date].dropna()
+    if values.empty:
+        return None
+    return float(values.iloc[-1])
 
 
 def _attach_trade_cash_columns(frame: pd.DataFrame, files: PortfolioIndexFiles) -> pd.DataFrame:
@@ -288,16 +354,7 @@ def _download_weighted_constituent_prices(
         weights[yahoo_symbol] = float(row.weight_pct)
     if not symbols:
         return pd.DataFrame()
-    prices = yf.download(
-        sorted(set(symbols)),
-        start=start.strftime("%Y-%m-%d"),
-        end=(as_of + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-        auto_adjust=True,
-        progress=False,
-        group_by="ticker",
-        threads=True,
-    )
-    closes = _extract_download_closes(prices, sorted(set(symbols)))
+    closes = _download_constituent_closes(sorted(set(symbols)), start, as_of)
     closes = closes.dropna(axis=1, how="all").ffill().dropna(how="all")
     if closes.empty:
         return closes
@@ -306,6 +363,37 @@ def _download_weighted_constituent_prices(
     )
     available_weights = available_weights / available_weights.sum()
     return closes.mul(available_weights, axis=1)
+
+
+def _download_constituent_closes(
+    symbols: list[str], start: pd.Timestamp, end: pd.Timestamp
+) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame()
+    prices = yf.download(
+        symbols,
+        start=start.strftime("%Y-%m-%d"),
+        end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+        group_by="ticker",
+        threads=True,
+    )
+    return _extract_download_closes(prices, symbols)
+
+
+def _latest_close(series: pd.Series) -> tuple[pd.Timestamp, float] | None:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return None
+    return pd.Timestamp(values.index[-1]), float(values.iloc[-1])
+
+
+def _format_price_timestamp(value: pd.Timestamp) -> str:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("Europe/Paris")
+    return timestamp.strftime("%Y-%m-%d %H:%M")
 
 
 def _extract_download_closes(download: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:

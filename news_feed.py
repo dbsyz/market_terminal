@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 from typing import Any
 
 import requests
@@ -37,11 +38,37 @@ DEFAULT_NEWS_QUERIES = (
 )
 
 
+class GdeltRateLimitError(RuntimeError):
+    pass
+
+
+class GdeltResponseError(RuntimeError):
+    pass
+
+
 class GdeltNewsClient:
-    def __init__(self, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        session: requests.Session | None = None,
+        cache_ttl_seconds: float = 90.0,
+        rate_limit_backoff_seconds: float = 90.0,
+    ) -> None:
         self.session = session or requests.Session()
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.rate_limit_backoff_seconds = rate_limit_backoff_seconds
+        self._cache: dict[tuple[str, str, int], tuple[float, tuple[NewsArticle, ...]]] = {}
+        self._rate_limited_until = 0.0
 
     def search(self, query: NewsQuery) -> tuple[NewsArticle, ...]:
+        cache_key = (query.query, query.timespan, query.max_records)
+        cached = self._cache.get(cache_key)
+        now = monotonic()
+        if cached and now - cached[0] < self.cache_ttl_seconds:
+            return cached[1]
+        if now < self._rate_limited_until:
+            raise GdeltRateLimitError(
+                "GDELT is rate limiting news requests. Wait a minute, then refresh again."
+            )
         response = self.session.get(
             GDELT_DOC_ENDPOINT,
             params={
@@ -54,8 +81,23 @@ class GdeltNewsClient:
             },
             timeout=15,
         )
+        if response.status_code == 429:
+            self._rate_limited_until = now + self.rate_limit_backoff_seconds
+            raise GdeltRateLimitError(
+                "GDELT is rate limiting news requests. Wait a minute, then refresh again."
+            )
         response.raise_for_status()
-        return parse_gdelt_articles(response.json())
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GdeltResponseError(
+                "GDELT returned an empty or non-JSON response. Wait briefly and refresh again."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise GdeltResponseError("GDELT returned an unexpected response format.")
+        articles = parse_gdelt_articles(payload)
+        self._cache[cache_key] = (now, articles)
+        return articles
 
 
 def parse_gdelt_articles(payload: dict[str, Any]) -> tuple[NewsArticle, ...]:

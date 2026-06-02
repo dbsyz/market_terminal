@@ -12,7 +12,9 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from tkinter import messagebox, ttk
+from zoneinfo import ZoneInfo
 
 import matplotlib.dates as mdates
 import numpy as np
@@ -31,8 +33,18 @@ from .models import (
     RangeSpec,
 )
 from .macro_dashboard import MacroDashboardService, MacroDashboardSnapshot
-from .news_feed import GdeltNewsClient, NewsArticle, default_news_queries, news_query_by_label
-from .provider_registry import provider_health_summary
+from .news_feed import (
+    GdeltNewsClient,
+    GdeltRateLimitError,
+    NewsArticle,
+    default_news_queries,
+    news_query_by_label,
+)
+from .portfolio_index import (
+    PORTFOLIO_INDEX_SYMBOL,
+    PortfolioConstituentQuote,
+    portfolio_constituent_quotes,
+)
 from .providers import MarketDataProvider
 from .sec_edgar import SecCompanyContext, SecEdgarClient, format_sec_company_context
 
@@ -77,6 +89,9 @@ MIN_MACRO_WINDOW_WIDTH = 520
 MIN_MACRO_WINDOW_HEIGHT = 320
 MIN_NEWS_WINDOW_WIDTH = 620
 MIN_NEWS_WINDOW_HEIGHT = 360
+SHOW_MACRO_WINDOW = False
+SHOW_NEWS_WINDOW = False
+WATCHLIST_REFRESH_INTERVAL_MS = 5000
 
 
 @dataclass(frozen=True)
@@ -147,7 +162,11 @@ class MarketTerminalApp(tk.Tk):
         self.macro_category_var = tk.StringVar(value="rates")
         self.macro_status_var = tk.StringVar(value="FRED macro dashboard")
         self.news_topic_var = tk.StringVar(value="Markets")
-        self.news_status_var = tk.StringVar(value="Live news via GDELT")
+        self.news_status_var = tk.StringVar(value="Live news via GDELT. Click REFRESH to load.")
+        self.local_time_var = tk.StringVar(value="")
+        self.new_york_time_var = tk.StringVar(value="")
+        self.london_time_var = tk.StringVar(value="")
+        self.hong_kong_time_var = tk.StringVar(value="")
         self.search_action_var = tk.StringVar(value="OPEN SECURITY")
         self.search_sort_var = tk.StringVar(value="Relevance")
         self.exchange_filter_var = tk.StringVar(value="All Markets")
@@ -157,6 +176,12 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_instruments: dict[str, Instrument] = {}
         self.watchlist_target_item: str | None = None
         self.watchlist_editor: tk.Entry | None = None
+        self.watchlist_quote_inflight: set[str] = set()
+        self.watchlist_refresh_after_id: str | None = None
+        self.watchlist_last_quotes: dict[str, tuple[float | None, float | None, float | None]] = {}
+        self.watchlist_drag_item: str | None = None
+        self.watchlist_drag_start_y = 0
+        self.watchlist_drag_active = False
         self.add_to_compare_mode = False
         self.suggestion_anchor = None
         self.selected_instrument: Instrument | None = None
@@ -189,6 +214,12 @@ class MarketTerminalApp(tk.Tk):
         source_root = Path(__file__).resolve().parent
         self.source_watch_paths = tuple(source_root / name for name in RUNTIME_SOURCE_FILES)
         self.source_snapshot = source_file_snapshot(self.source_watch_paths)
+        self.portfolio_quote_popup: tk.Toplevel | None = None
+        self.portfolio_quote_tree: ttk.Treeview | None = None
+        self.portfolio_quote_status_var = tk.StringVar(value="")
+        self.portfolio_quote_request_id = 0
+        self.portfolio_quote_hide_after_id: str | None = None
+        self.news_request_id = 0
 
         self._configure_styles()
         self._build_controls()
@@ -206,6 +237,7 @@ class MarketTerminalApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._close_app)
         self._set_mode("Intraday")
         self.after_idle(self._restore_window_state)
+        self._tick_header_clocks()
         self.after(SOURCE_WATCH_INTERVAL_MS, self._poll_for_source_update)
 
     def _configure_styles(self) -> None:
@@ -215,6 +247,12 @@ class MarketTerminalApp(tk.Tk):
         style.configure("Panel.TFrame", background=PANEL)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Status.TLabel", background=BG, foreground=MUTED)
+        style.configure(
+            "Clock.TLabel",
+            background=BG,
+            foreground=TEXT,
+            font=("Consolas", 10, "bold"),
+        )
         style.configure(
             "Update.TLabel",
             background=ORANGE,
@@ -303,25 +341,38 @@ class MarketTerminalApp(tk.Tk):
             indicatorcolor=[("selected", ORANGE)],
         )
 
+    def _tick_header_clocks(self) -> None:
+        local_now = datetime.now().astimezone()
+        self.local_time_var.set(f"LOCAL {local_now:%H:%M:%S}")
+        self.new_york_time_var.set(
+            f"NEW YORK {datetime.now(ZoneInfo('America/New_York')):%H:%M:%S}"
+        )
+        self.london_time_var.set(f"LONDON {datetime.now(ZoneInfo('Europe/London')):%H:%M:%S}")
+        self.hong_kong_time_var.set(
+            f"HK {datetime.now(ZoneInfo('Asia/Hong_Kong')):%H:%M:%S}"
+        )
+        self.after(1000, self._tick_header_clocks)
+
     def _build_controls(self) -> None:
         header = ttk.Frame(self, padding=(18, 13, 18, 8))
         header.pack(fill=tk.X)
-        ttk.Label(header, text="MARKET TERMINAL", style="Title.TLabel").pack(side=tk.LEFT)
-        ttk.Label(
-            header, text="  market chart workspace", style="Status.TLabel"
-        ).pack(side=tk.LEFT, pady=(5, 0))
         ttk.Button(
             header,
             text="SAVE LAYOUT",
             style="Chip.TButton",
             command=self._manual_save_function_layout,
         ).pack(side=tk.RIGHT, pady=(2, 0))
-        ttk.Button(
-            header,
-            text="DATA STATUS",
-            style="Chip.TButton",
-            command=self._show_provider_status,
-        ).pack(side=tk.RIGHT, padx=(0, 8), pady=(2, 0))
+        for variable in reversed(
+            (
+                self.local_time_var,
+                self.new_york_time_var,
+                self.london_time_var,
+                self.hong_kong_time_var,
+            )
+        ):
+            ttk.Label(header, textvariable=variable, style="Clock.TLabel").pack(
+                side=tk.RIGHT, padx=(18, 0)
+            )
 
         self._build_update_banner()
         workspace = ttk.Frame(self, padding=(18, 0, 18, 0))
@@ -406,9 +457,12 @@ class MarketTerminalApp(tk.Tk):
         ttk.Label(self.chart_panel, textvariable=self.identity_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 3)
         )
-        ttk.Label(self.chart_panel, textvariable=self.quote_var, style="Quote.TLabel").pack(
-            anchor=tk.W, pady=(0, 6)
+        self.quote_label = ttk.Label(
+            self.chart_panel, textvariable=self.quote_var, style="Quote.TLabel", cursor="hand2"
         )
+        self.quote_label.pack(anchor=tk.W, pady=(0, 6))
+        self.quote_label.bind("<Enter>", self._show_portfolio_quote_popup)
+        self.quote_label.bind("<Leave>", self._hide_portfolio_quote_popup)
         ttk.Label(self.chart_panel, textvariable=self.fundamentals_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 4)
         )
@@ -427,7 +481,7 @@ class MarketTerminalApp(tk.Tk):
         self._build_news_window()
         self.after_idle(self._layout_initial_workspace_windows)
         self.after_idle(self.refresh_watchlist)
-        self.after(650, self.refresh_news_feed)
+        self.after_idle(self._schedule_watchlist_refresh_loop)
 
     def _layout_initial_workspace_windows(self) -> None:
         self.desktop.update_idletasks()
@@ -441,7 +495,6 @@ class MarketTerminalApp(tk.Tk):
         height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
         watch_width = min(430, max(360, int(width * 0.32)))
         chart_width = max(MIN_CHART_WINDOW_WIDTH, width - watch_width - 10)
-        macro_height = min(max(320, int(height * 0.38)), height)
         self.watchlist_window.place_configure(
             x=0,
             y=0,
@@ -449,13 +502,8 @@ class MarketTerminalApp(tk.Tk):
             height=min(height, 520),
         )
         self.chart_window.place_configure(x=watch_width + 10, y=0, width=chart_width, height=height)
-        self.news_window.place_configure(
-            x=watch_width + 10,
-            y=max(0, height - min(360, height)),
-            width=chart_width,
-            height=min(360, height),
-        )
-        self.macro_window.place_forget()
+        self._hide_macro_window()
+        self._hide_news_window()
         self._mark_layout_saved_snapshot()
 
     def _restore_saved_function_layout(self) -> bool:
@@ -465,7 +513,6 @@ class MarketTerminalApp(tk.Tk):
         for name, widget, minimum_width, minimum_height in (
             ("watchlist", self.watchlist_window, 360, 260),
             ("chart", self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT),
-            ("news", self.news_window, MIN_NEWS_WINDOW_WIDTH, MIN_NEWS_WINDOW_HEIGHT),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
@@ -478,7 +525,10 @@ class MarketTerminalApp(tk.Tk):
             restored = True
         self._constrain_chart_window_to_desktop(None)
         self._constrain_watchlist_window_to_desktop()
-        self._constrain_news_window_to_desktop()
+        if SHOW_NEWS_WINDOW:
+            self._constrain_news_window_to_desktop()
+        self._hide_macro_window()
+        self._hide_news_window()
         self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
 
@@ -486,7 +536,6 @@ class MarketTerminalApp(tk.Tk):
         for name, widget in (
             ("watchlist", self.watchlist_window),
             ("chart", self.chart_window),
-            ("news", self.news_window),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
@@ -497,6 +546,16 @@ class MarketTerminalApp(tk.Tk):
                 width=int(geometry.get("width", widget.winfo_width())),
                 height=int(geometry.get("height", widget.winfo_height())),
             )
+        self._hide_macro_window()
+        self._hide_news_window()
+
+    def _hide_macro_window(self) -> None:
+        if hasattr(self, "macro_window") and not SHOW_MACRO_WINDOW:
+            self.macro_window.place_forget()
+
+    def _hide_news_window(self) -> None:
+        if hasattr(self, "news_window") and not SHOW_NEWS_WINDOW:
+            self.news_window.place_forget()
 
     def _build_group_selector(
         self, parent: tk.Widget, variable: tk.StringVar, command
@@ -605,9 +664,9 @@ class MarketTerminalApp(tk.Tk):
         self.chart_window.place_configure(x=left, y=top, width=width, height=height)
         if hasattr(self, "watchlist_window"):
             self._constrain_watchlist_window_to_desktop()
-        if hasattr(self, "macro_window"):
+        if hasattr(self, "macro_window") and SHOW_MACRO_WINDOW:
             self._constrain_macro_window_to_desktop()
-        if hasattr(self, "news_window"):
+        if hasattr(self, "news_window") and SHOW_NEWS_WINDOW:
             self._constrain_news_window_to_desktop()
 
     def _constrain_watchlist_window_to_desktop(self) -> None:
@@ -622,6 +681,9 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _constrain_macro_window_to_desktop(self) -> None:
+        if not SHOW_MACRO_WINDOW:
+            self._hide_macro_window()
+            return
         if self.desktop.winfo_width() < MIN_MACRO_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_MACRO_WINDOW_HEIGHT:
             return
         desktop_width = max(self.desktop.winfo_width(), MIN_MACRO_WINDOW_WIDTH)
@@ -633,6 +695,9 @@ class MarketTerminalApp(tk.Tk):
         self.macro_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _constrain_news_window_to_desktop(self) -> None:
+        if not SHOW_NEWS_WINDOW:
+            self._hide_news_window()
+            return
         if self.desktop.winfo_width() < MIN_NEWS_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_NEWS_WINDOW_HEIGHT:
             return
         desktop_width = max(self.desktop.winfo_width(), MIN_NEWS_WINDOW_WIDTH)
@@ -869,20 +934,29 @@ class MarketTerminalApp(tk.Tk):
         content.pack(fill=tk.BOTH, expand=True)
         self.watchlist_tree = ttk.Treeview(
             content,
-            columns=("asset", "last", "bid", "ask", "volume"),
+            columns=("asset", "last", "bid", "ask", "change", "volume", "latency"),
             show="headings",
             height=12,
         )
+        self.watchlist_tree.tag_configure("tick_up", foreground=UP)
+        self.watchlist_tree.tag_configure("tick_down", foreground=DOWN)
+        self.watchlist_tree.tag_configure("tick_flat", foreground=TEXT)
+        self.watchlist_tree.tag_configure("tick_error", foreground=DOWN)
         for column, title, width in (
-            ("asset", "Asset", 145),
+            ("asset", "Asset", 125),
             ("last", "Last", 70),
             ("bid", "Bid", 70),
             ("ask", "Ask", 70),
-            ("volume", "Volume", 90),
+            ("change", "Chg", 80),
+            ("volume", "Volume", 75),
+            ("latency", "Latency", 65),
         ):
             self.watchlist_tree.heading(column, text=title)
             self.watchlist_tree.column(column, width=width, anchor=tk.W)
         self.watchlist_tree.pack(fill=tk.BOTH, expand=True)
+        self.watchlist_tree.bind("<ButtonPress-1>", self._start_watchlist_row_drag, add="+")
+        self.watchlist_tree.bind("<B1-Motion>", self._drag_watchlist_row, add="+")
+        self.watchlist_tree.bind("<ButtonRelease-1>", self._finish_watchlist_row_drag, add="+")
         self.watchlist_tree.bind("<Double-Button-1>", self._begin_watchlist_asset_search)
         self.watchlist_tree.bind("<<TreeviewSelect>>", self._on_watchlist_selection_changed)
         actions = ttk.Frame(content, style="Panel.TFrame")
@@ -919,7 +993,8 @@ class MarketTerminalApp(tk.Tk):
             highlightbackground=GRID,
             highlightthickness=1,
         )
-        self.macro_window.place(x=0, y=530, width=430, height=340)
+        if SHOW_MACRO_WINDOW:
+            self.macro_window.place(x=0, y=530, width=430, height=340)
         self.macro_titlebar = tk.Frame(self.macro_window, bg=GRID, height=28, cursor="fleur")
         self.macro_titlebar.pack(fill=tk.X)
         self.macro_titlebar.pack_propagate(False)
@@ -1017,7 +1092,8 @@ class MarketTerminalApp(tk.Tk):
             highlightbackground=GRID,
             highlightthickness=1,
         )
-        self.news_window.place(x=460, y=520, width=820, height=360)
+        if SHOW_NEWS_WINDOW:
+            self.news_window.place(x=460, y=520, width=820, height=360)
         self.news_titlebar = tk.Frame(self.news_window, bg=GRID, height=28, cursor="fleur")
         self.news_titlebar.pack(fill=tk.X)
         self.news_titlebar.pack_propagate(False)
@@ -1104,7 +1180,11 @@ class MarketTerminalApp(tk.Tk):
     def _add_watchlist_row(self, row: dict | None = None) -> None:
         item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
         instrument = instrument_from_watchlist_row(row or {})
-        values = (watchlist_asset_label(instrument), "", "", "", "") if instrument else ("", "", "", "", "")
+        values = (
+            (watchlist_asset_label(instrument), "", "", "", "", "", "")
+            if instrument
+            else ("", "", "", "", "", "", "")
+        )
         self.watchlist_tree.insert("", tk.END, iid=item, values=values)
         if instrument:
             self.watchlist_instruments[item] = instrument
@@ -1112,8 +1192,46 @@ class MarketTerminalApp(tk.Tk):
     def _remove_watchlist_row(self) -> None:
         for item in self.watchlist_tree.selection():
             self.watchlist_instruments.pop(item, None)
+            self.watchlist_last_quotes.pop(item, None)
+            self.watchlist_quote_inflight.discard(item)
             self.watchlist_tree.delete(item)
         self._save_watchlist_state()
+
+    def _start_watchlist_row_drag(self, event: tk.Event) -> None:
+        if self.watchlist_editor is not None:
+            return
+        item = self.watchlist_tree.identify_row(event.y)
+        column = self.watchlist_tree.identify_column(event.x)
+        if not item or column == "#0":
+            self.watchlist_drag_item = None
+            return
+        self.watchlist_drag_item = item
+        self.watchlist_drag_start_y = event.y
+        self.watchlist_drag_active = False
+
+    def _drag_watchlist_row(self, event: tk.Event) -> str:
+        item = self.watchlist_drag_item
+        if not item:
+            return "break"
+        if abs(event.y - self.watchlist_drag_start_y) < 6 and not self.watchlist_drag_active:
+            return "break"
+        self.watchlist_drag_active = True
+        target = self.watchlist_tree.identify_row(event.y)
+        if target and target != item:
+            target_index = self.watchlist_tree.index(target)
+            self.watchlist_tree.move(item, "", target_index)
+            self.watchlist_tree.selection_set(item)
+        return "break"
+
+    def _finish_watchlist_row_drag(self, _event: tk.Event) -> str | None:
+        was_active = self.watchlist_drag_active
+        if self.watchlist_drag_active:
+            self._save_watchlist_state()
+            self.status_var.set("Watchlist order saved.")
+        self.watchlist_drag_item = None
+        self.watchlist_drag_start_y = 0
+        self.watchlist_drag_active = False
+        return "break" if was_active else None
 
     def _on_watchlist_selection_changed(self, _event: tk.Event | None = None) -> None:
         selected = self.watchlist_tree.selection()
@@ -1275,6 +1393,8 @@ class MarketTerminalApp(tk.Tk):
         self._save_watchlist_state()
         if self.layout_save_after_id:
             self.after_cancel(self.layout_save_after_id)
+        if self.watchlist_refresh_after_id:
+            self.after_cancel(self.watchlist_refresh_after_id)
         if self.layout_dirty:
             save_layout = messagebox.askyesno(
                 "Unsaved layout changes",
@@ -1294,19 +1414,12 @@ class MarketTerminalApp(tk.Tk):
         self._save_function_layout(show_status=True)
         self.layout_manually_saved = True
 
-    def _show_provider_status(self) -> None:
-        summary = provider_health_summary()
-        self.status_var.set("Provider status report opened.")
-        messagebox.showinfo("Data Provider Status", summary, parent=self)
-
     def _save_function_layout(self, show_status: bool = False) -> None:
         self.layout_save_after_id = None
         self.update_idletasks()
         layout = {
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
-            "macro": window_place_geometry(self.macro_window),
-            "news": window_place_geometry(self.news_window),
         }
         save_layout_state(self.layout_state_path, layout)
         self.saved_layout_state = layout
@@ -1326,8 +1439,6 @@ class MarketTerminalApp(tk.Tk):
         return {
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
-            "macro": window_place_geometry(self.macro_window),
-            "news": window_place_geometry(self.news_window),
         }
 
     def _mark_layout_saved_snapshot(self) -> None:
@@ -2354,7 +2465,7 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_instruments[item] = instrument
         self.watchlist_tree.item(
             item,
-            values=(watchlist_asset_label(instrument), "Loading", "", "", ""),
+            values=(watchlist_asset_label(instrument), "Loading", "", "", "", "", ""),
         )
         self.search_action_var.set("OPEN SECURITY")
         self.watchlist_search_var.set("")
@@ -2421,6 +2532,14 @@ class MarketTerminalApp(tk.Tk):
     def _update_news_feed(self, label: str, articles: tuple[NewsArticle, ...]) -> None:
         self.news_tree.delete(*self.news_tree.get_children())
         self.news_articles = articles
+        if not articles:
+            self.news_tree.insert(
+                "",
+                tk.END,
+                values=("", "GDELT", f"No {label} articles returned for this query.", ""),
+            )
+            self.news_status_var.set(f"No {label} articles returned via GDELT.")
+            return
         for index, article in enumerate(articles):
             self.news_tree.insert(
                 "",
@@ -2435,6 +2554,20 @@ class MarketTerminalApp(tk.Tk):
             )
         self.news_status_var.set(f"{len(articles)} {label} articles via GDELT. Double-click to open.")
 
+    def _show_news_error(self, label: str, exc: Exception) -> None:
+        detail = str(exc).strip() or exc.__class__.__name__
+        self.news_tree.delete(*self.news_tree.get_children())
+        self.news_articles = ()
+        self.news_tree.insert("", tk.END, values=("", "ERROR", detail, ""))
+        self.news_status_var.set(f"{label}: {detail}")
+
+    def _show_portfolio_quote_error(self, label: str, exc: Exception) -> None:
+        detail = str(exc).strip() or exc.__class__.__name__
+        if self.portfolio_quote_tree is not None:
+            self.portfolio_quote_tree.delete(*self.portfolio_quote_tree.get_children())
+            self.portfolio_quote_tree.insert("", tk.END, values=("", "", "", "", "", detail))
+        self.portfolio_quote_status_var.set(f"{label}: {detail}")
+
     def _open_selected_news_article(self, _event: tk.Event | None = None) -> str:
         selected = self.news_tree.selection()
         if not selected or not hasattr(self, "news_articles"):
@@ -2444,6 +2577,121 @@ class MarketTerminalApp(tk.Tk):
         self.news_status_var.set(f"Opened: {article.title[:90]}")
         return "break"
 
+    def _show_portfolio_quote_popup(self, _event: tk.Event | None = None) -> str:
+        if self.portfolio_quote_hide_after_id:
+            self.after_cancel(self.portfolio_quote_hide_after_id)
+            self.portfolio_quote_hide_after_id = None
+        instrument = self.selected_instrument
+        if not instrument or instrument.symbol.upper() != PORTFOLIO_INDEX_SYMBOL:
+            return "break"
+        self._create_portfolio_quote_popup()
+        self.portfolio_quote_request_id += 1
+        request_id = self.portfolio_quote_request_id
+        self.portfolio_quote_status_var.set("Loading constituent prices via Yahoo Finance...")
+        if self.portfolio_quote_tree is not None:
+            self.portfolio_quote_tree.delete(*self.portfolio_quote_tree.get_children())
+        self._run_background(
+            portfolio_constituent_quotes,
+            lambda quotes: self._update_portfolio_quote_popup(request_id, quotes),
+            "FORT_PNL constituents failed",
+            lambda: request_id == self.portfolio_quote_request_id
+            and self.portfolio_quote_popup is not None,
+        )
+        return "break"
+
+    def _create_portfolio_quote_popup(self) -> None:
+        if self.portfolio_quote_popup is not None:
+            self.portfolio_quote_popup.destroy()
+        popup = tk.Toplevel(self)
+        popup.overrideredirect(True)
+        popup.configure(bg=GRID)
+        popup.transient(self)
+        popup.bind("<Enter>", self._cancel_portfolio_quote_popup_hide)
+        popup.bind("<Leave>", self._hide_portfolio_quote_popup)
+        self.portfolio_quote_popup = popup
+        x = self.quote_label.winfo_rootx()
+        y = self.quote_label.winfo_rooty() + self.quote_label.winfo_height() + 4
+        popup.geometry(f"760x320+{x}+{y}")
+        popup.lift()
+        frame = ttk.Frame(popup, style="Panel.TFrame", padding=7)
+        frame.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        ttk.Label(
+            frame,
+            text="FORT_PNL constituents | latest available Yahoo closes",
+            style="Status.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 5))
+        columns = ("ticker", "weight", "last", "updated", "snapshot", "name")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
+        headings = {
+            "ticker": "Ticker",
+            "weight": "Weight",
+            "last": "Last",
+            "updated": "Updated",
+            "snapshot": "Snapshot",
+            "name": "Name",
+        }
+        widths = {
+            "ticker": 95,
+            "weight": 70,
+            "last": 85,
+            "updated": 95,
+            "snapshot": 95,
+            "name": 360,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], anchor=tk.W, stretch=column == "name")
+        tree.pack(fill=tk.BOTH, expand=True)
+        tree.bind("<Enter>", self._cancel_portfolio_quote_popup_hide)
+        tree.bind("<Leave>", self._hide_portfolio_quote_popup)
+        ttk.Label(frame, textvariable=self.portfolio_quote_status_var, style="Status.TLabel").pack(
+            anchor=tk.W, pady=(5, 0)
+        )
+        self.portfolio_quote_tree = tree
+
+    def _update_portfolio_quote_popup(
+        self, request_id: int, quotes: tuple[PortfolioConstituentQuote, ...]
+    ) -> None:
+        if request_id != self.portfolio_quote_request_id or self.portfolio_quote_tree is None:
+            return
+        self.portfolio_quote_tree.delete(*self.portfolio_quote_tree.get_children())
+        for quote in quotes:
+            self.portfolio_quote_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    quote.yahoo_symbol or quote.ticker,
+                    f"{quote.weight_pct:,.2f}%",
+                    format_quote_value(quote.last_price),
+                    quote.last_updated,
+                    format_quote_value(quote.snapshot_price),
+                    quote.name,
+                ),
+            )
+        self.portfolio_quote_status_var.set(
+            f"{len(quotes)} constituents | live estimate uses current weights, not broker refresh."
+        )
+
+    def _cancel_portfolio_quote_popup_hide(self, _event: tk.Event | None = None) -> str:
+        if self.portfolio_quote_hide_after_id:
+            self.after_cancel(self.portfolio_quote_hide_after_id)
+            self.portfolio_quote_hide_after_id = None
+        return "break"
+
+    def _hide_portfolio_quote_popup(self, _event: tk.Event | None = None) -> str:
+        if self.portfolio_quote_hide_after_id:
+            self.after_cancel(self.portfolio_quote_hide_after_id)
+        self.portfolio_quote_hide_after_id = self.after(450, self._destroy_portfolio_quote_popup)
+        return "break"
+
+    def _destroy_portfolio_quote_popup(self) -> None:
+        self.portfolio_quote_hide_after_id = None
+        self.portfolio_quote_request_id += 1
+        if self.portfolio_quote_popup is not None:
+            self.portfolio_quote_popup.destroy()
+        self.portfolio_quote_popup = None
+        self.portfolio_quote_tree = None
+
     def _save_watchlist_state(self) -> None:
         rows = []
         for item in self.watchlist_tree.get_children():
@@ -2451,25 +2699,78 @@ class MarketTerminalApp(tk.Tk):
             rows.append(watchlist_row_from_instrument(instrument))
         save_watchlist_state(self.watchlist_state_path, rows)
 
+    def _schedule_watchlist_refresh_loop(self) -> None:
+        self.refresh_watchlist()
+        self.watchlist_refresh_after_id = self.after(
+            WATCHLIST_REFRESH_INTERVAL_MS, self._schedule_watchlist_refresh_loop
+        )
+
     def _refresh_watchlist_item(self, item: str, instrument: Instrument) -> None:
+        if item in self.watchlist_quote_inflight:
+            return
+        self.watchlist_quote_inflight.add(item)
         self._run_background(
-            lambda: self.provider.quote_snapshot(instrument),
-            lambda quote: self._update_watchlist_quote(item, instrument, quote),
+            lambda: self._fetch_watchlist_quote(instrument),
+            lambda result: self._update_watchlist_quote(item, instrument, result[0], result[1]),
             "Watchlist quote failed",
             lambda: item in self.watchlist_instruments
             and self.watchlist_instruments[item].symbol == instrument.symbol,
+            lambda exc: self._update_watchlist_quote_error(item, instrument, exc),
         )
 
-    def _update_watchlist_quote(self, item: str, instrument: Instrument, quote) -> None:
+    def _fetch_watchlist_quote(self, instrument: Instrument):
+        start = perf_counter()
+        quote = self.provider.quote_snapshot(instrument, include_slow_info=False)
+        latency_ms = (perf_counter() - start) * 1000
+        return quote, latency_ms
+
+    def _update_watchlist_quote(self, item: str, instrument: Instrument, quote, latency_ms: float) -> None:
+        self.watchlist_quote_inflight.discard(item)
+        direction_tag = self._watchlist_tick_tag(item, quote)
         self.watchlist_tree.item(
             item,
             values=(
                 watchlist_asset_label(instrument),
                 format_quote_value(quote.last),
-                format_quote_value(quote.bid),
-                format_quote_value(quote.ask),
+                format_bid_ask_value(quote.bid, quote, "bid"),
+                format_bid_ask_value(quote.ask, quote, "ask"),
+                format_quote_change(quote.change, quote.change_percent),
                 format_volume_value(quote.volume) if quote.volume is not None else "",
+                format_latency_value(latency_ms),
             ),
+            tags=(direction_tag,),
+        )
+
+    def _watchlist_tick_tag(self, item: str, quote) -> str:
+        current = (quote.last, quote.bid, quote.ask)
+        previous = self.watchlist_last_quotes.get(item)
+        self.watchlist_last_quotes[item] = current
+        if previous is None:
+            return "tick_flat"
+        for old, new in zip(previous, current):
+            if old is None or new is None or old == new:
+                continue
+            return "tick_up" if new > old else "tick_down"
+        return "tick_flat"
+
+    def _update_watchlist_quote_error(
+        self, item: str, instrument: Instrument, exc: Exception
+    ) -> None:
+        self.watchlist_quote_inflight.discard(item)
+        if item not in self.watchlist_instruments:
+            return
+        self.watchlist_tree.item(
+            item,
+            values=(
+                watchlist_asset_label(instrument),
+                "ERR",
+                "",
+                "",
+                "",
+                "",
+                str(exc).strip()[:18] or exc.__class__.__name__,
+            ),
+            tags=("tick_error",),
         )
 
     def _open_search_result(self) -> None:
@@ -3357,7 +3658,14 @@ class MarketTerminalApp(tk.Tk):
         self.study_axis.grid(False)
         self.price_axis.tick_params(labelbottom=False)
 
-    def _run_background(self, function, on_success, label: str, is_current=lambda: True) -> None:
+    def _run_background(
+        self,
+        function,
+        on_success,
+        label: str,
+        is_current=lambda: True,
+        on_error=None,
+    ) -> None:
         def worker() -> None:
             try:
                 result = function()
@@ -3365,7 +3673,13 @@ class MarketTerminalApp(tk.Tk):
                 error = exc
                 self.after(
                     0,
-                    lambda: self._show_error(label, error) if is_current() else None,
+                    lambda: (
+                        on_error(error)
+                        if on_error is not None and is_current()
+                        else self._show_error(label, error)
+                        if is_current()
+                        else None
+                    ),
                 )
                 return
             self.after(0, lambda: on_success(result))
@@ -3374,7 +3688,16 @@ class MarketTerminalApp(tk.Tk):
 
     def _show_error(self, label: str, exc: Exception) -> None:
         detail = str(exc).strip() or exc.__class__.__name__
+        if label == "News request failed":
+            self._show_news_error(label, exc)
+            return
+        if label == "FORT_PNL constituents failed":
+            self._show_portfolio_quote_error(label, exc)
+            return
         self.status_var.set(f"{label}: {detail}")
+        if isinstance(exc, GdeltRateLimitError):
+            self.news_status_var.set(detail)
+            return
         messagebox.showerror(label, detail, parent=self)
 
 
@@ -3807,6 +4130,26 @@ def format_quote_value(value: float | None) -> str:
     return f"{value:,.4f}"
 
 
+def format_bid_ask_value(value: float | None, quote, side: str) -> str:
+    if value is not None:
+        return format_quote_value(value)
+    other = quote.ask if side == "bid" else quote.bid
+    state = str(getattr(quote, "market_state", "") or "").upper()
+    if state and state not in {"REGULAR", "OPEN"}:
+        return "MKT CLOSED"
+    if other is None and quote.last is not None:
+        return "MKT CLOSED"
+    return ""
+
+
+def format_quote_change(change: float | None, change_percent: float | None = None) -> str:
+    if change is None and change_percent is None:
+        return ""
+    if change_percent is not None:
+        return f"{change_percent:+.2f}%"
+    return ""
+
+
 def format_signed_value(value: float | None) -> str:
     if value is None:
         return ""
@@ -4099,6 +4442,14 @@ def format_volume_value(value: float) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.0f}K"
     return f"{value:.0f}"
+
+
+def format_latency_value(value_ms: float | None) -> str:
+    if value_ms is None:
+        return ""
+    if value_ms >= 1000:
+        return f"{value_ms / 1000:.2f}s"
+    return f"{value_ms:.0f}ms"
 
 
 def _euro_cash_formatter():

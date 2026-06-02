@@ -6,6 +6,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 
+import market_terminal.portfolio_index as portfolio_index
 from market_terminal.models import HISTORICAL_RANGES, INTRADAY_RANGES, Instrument, RangeSpec
 from market_terminal.portfolio_index import _first_trade_date, build_portfolio_monitor_report, portfolio_index_files
 from market_terminal.providers import (
@@ -266,6 +267,78 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(len(frame), 1)
         self.assertEqual(float(frame["Close"].iloc[-1]), 123.5)
 
+    def test_local_fort_pnl_extends_snapshot_with_current_weight_prices(self) -> None:
+        prices = pd.DataFrame(
+            {
+                "AAA": [0.6, 0.72, 0.78],
+                "BBB": [0.4, 0.48, 0.52],
+            },
+            index=pd.to_datetime(["2026-01-01", "2026-05-29", "2026-06-02"]),
+        )
+
+        def download_stub(_constituents, _start, _as_of):
+            return prices
+
+        with temporary_portfolio_index_dir() as out_dir:
+            original = os.environ.get("FORT_PNL_OUT_DIR")
+            original_download = portfolio_index._download_weighted_constituent_prices
+            original_current_date = portfolio_index._current_date
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            portfolio_index._download_weighted_constituent_prices = download_stub
+            portfolio_index._current_date = lambda: pd.Timestamp("2026-06-02")
+            try:
+                provider = MarketDataProvider.__new__(MarketDataProvider)
+                frame = provider.history(Instrument("FORT_PNL", "FORT PNL"), HISTORICAL_RANGES[-1])
+            finally:
+                portfolio_index._download_weighted_constituent_prices = original_download
+                portfolio_index._current_date = original_current_date
+                if original is None:
+                    os.environ.pop("FORT_PNL_OUT_DIR", None)
+                else:
+                    os.environ["FORT_PNL_OUT_DIR"] = original
+
+        self.assertEqual(frame.index[-1], pd.Timestamp("2026-06-02"))
+        self.assertAlmostEqual(float(frame.loc[pd.Timestamp("2026-05-29"), "Close"]), 123.5)
+        self.assertGreater(float(frame["Close"].iloc[-1]), 123.5)
+        self.assertIn("live-estimated", frame.attrs["data_source"])
+        self.assertEqual(frame.attrs["portfolio_snapshot_date"], "2026-05-31")
+
+    def test_local_fort_pnl_constituent_quotes_use_latest_available_closes(self) -> None:
+        closes = pd.DataFrame(
+            {
+                "AAA": [10.0, 10.5],
+                "BBB": [20.0, None],
+            },
+            index=pd.to_datetime(["2026-06-01", "2026-06-02"]),
+        )
+
+        def closes_stub(_symbols, _start, _end):
+            return closes
+
+        with temporary_portfolio_index_dir() as out_dir:
+            original = os.environ.get("FORT_PNL_OUT_DIR")
+            original_closes = portfolio_index._download_constituent_closes
+            original_current_date = portfolio_index._current_date
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            portfolio_index._download_constituent_closes = closes_stub
+            portfolio_index._current_date = lambda: pd.Timestamp("2026-06-02")
+            try:
+                quotes = portfolio_index.portfolio_constituent_quotes()
+            finally:
+                portfolio_index._download_constituent_closes = original_closes
+                portfolio_index._current_date = original_current_date
+                if original is None:
+                    os.environ.pop("FORT_PNL_OUT_DIR", None)
+                else:
+                    os.environ["FORT_PNL_OUT_DIR"] = original
+
+        self.assertEqual([quote.ticker for quote in quotes], ["AAA", "BBB"])
+        self.assertEqual(quotes[0].last_price, 10.5)
+        self.assertEqual(quotes[0].last_updated, "2026-06-02 00:00")
+        self.assertEqual(quotes[0].snapshot_price, 10.0)
+        self.assertEqual(quotes[1].last_price, 20.0)
+        self.assertEqual(quotes[1].last_updated, "2026-06-01 00:00")
+
     def test_local_fort_pnl_inception_date_comes_from_first_trade(self) -> None:
         with temporary_portfolio_index_dir() as out_dir:
             original = os.environ.get("FORT_PNL_OUT_DIR")
@@ -323,8 +396,14 @@ class MarketDataProviderTests(unittest.TestCase):
 
     def test_quote_snapshot_reads_fast_info_and_info_fallbacks(self) -> None:
         class TickerStub:
-            fast_info = {"last_price": 101.5}
-            info = {"bid": 101.4, "ask": 101.6, "regularMarketVolume": 123456}
+            fast_info = {"last_price": 101.5, "regular_market_change": 1.25}
+            info = {
+                "bid": 101.4,
+                "ask": 101.6,
+                "marketState": "REGULAR",
+                "regularMarketChangePercent": 1.24,
+                "regularMarketVolume": 123456,
+            }
 
         import market_terminal.providers as providers
 
@@ -339,7 +418,36 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(quote.last, 101.5)
         self.assertEqual(quote.bid, 101.4)
         self.assertEqual(quote.ask, 101.6)
+        self.assertEqual(quote.change, 1.25)
+        self.assertEqual(quote.change_percent, 1.24)
         self.assertEqual(quote.volume, 123456)
+        self.assertEqual(quote.market_state, "REGULAR")
+
+    def test_quote_snapshot_can_skip_slow_info_for_watchlist_ticks(self) -> None:
+        class TickerStub:
+            fast_info = {"last_price": 101.5, "previous_close": 100.0}
+
+            @property
+            def info(self):
+                raise AssertionError("slow info should not be fetched")
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            quote = provider.quote_snapshot(
+                Instrument("AAPL", "Apple"),
+                include_slow_info=False,
+            )
+        finally:
+            providers.yf.Ticker = original_ticker
+
+        self.assertEqual(quote.last, 101.5)
+        self.assertIsNone(quote.bid)
+        self.assertEqual(quote.change, 1.5)
+        self.assertEqual(quote.change_percent, 1.5)
 
     def test_selected_yahoo_asset_is_enriched_with_isin(self) -> None:
         class TickerStub:

@@ -6,6 +6,7 @@ from datetime import datetime
 from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
+from time import monotonic
 
 import pandas as pd
 import requests
@@ -270,6 +271,8 @@ class StooqClient:
 
 
 class MarketDataProvider:
+    quote_info_ttl_seconds = 60.0
+
     def __init__(
         self,
         figi: OpenFigiClient | None = None,
@@ -280,6 +283,7 @@ class MarketDataProvider:
         self.figi = figi or OpenFigiClient()
         self.twelve = twelve or TwelveDataClient()
         self.stooq = stooq or StooqClient()
+        self._quote_info_cache: dict[str, tuple[float, dict]] = {}
 
     def search(self, query: str) -> list[Instrument]:
         query = query.strip()
@@ -488,39 +492,104 @@ class MarketDataProvider:
         metadata = yf.Ticker(instrument.symbol).get_history_metadata()
         return build_market_session(metadata)
 
-    def quote_snapshot(self, instrument: Instrument) -> QuoteSnapshot:
+    def quote_snapshot(self, instrument: Instrument, include_slow_info: bool = True) -> QuoteSnapshot:
         if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
             frame = load_portfolio_index_history(RangeSpec("MAX", "max", "1d"))
             last = float(frame["Close"].iloc[-1]) if not frame.empty else None
+            previous = float(frame["Close"].iloc[-2]) if len(frame) >= 2 else None
+            change = last - previous if last is not None and previous is not None else None
+            change_percent = (
+                change / previous * 100
+                if change is not None and previous not in (None, 0)
+                else None
+            )
             volume = (
                 float(frame["Volume"].iloc[-1])
                 if not frame.empty and "Volume" in frame.columns
                 else None
             )
-            return QuoteSnapshot(last=last, volume=volume)
+            return QuoteSnapshot(
+                last=last,
+                change=change,
+                change_percent=change_percent,
+                volume=volume,
+                market_state="LOCAL INDEX",
+            )
         ticker = yf.Ticker(instrument.symbol)
         try:
             fast = dict(ticker.fast_info or {})
         except Exception:
             fast = {}
-        try:
-            info = ticker.info or {}
-        except Exception:
-            info = {}
-        return QuoteSnapshot(
-            last=_first_optional_float(
-                fast,
-                info,
-                ("last_price", "lastPrice", "regularMarketPrice", "currentPrice", "previousClose"),
+        info = self._quote_info(instrument.symbol, ticker, include_slow_info)
+        last = _first_optional_float(
+            fast,
+            info,
+            ("last_price", "lastPrice", "regularMarketPrice", "currentPrice", "previousClose"),
+        )
+        previous_close = _first_optional_float(
+            fast,
+            info,
+            (
+                "previous_close",
+                "previousClose",
+                "regularMarketPreviousClose",
+                "regular_market_previous_close",
             ),
+        )
+        change = _first_optional_float(
+            fast,
+            info,
+            ("regular_market_change", "regularMarketChange", "change"),
+        )
+        change_percent = _first_optional_float(
+            fast,
+            info,
+            (
+                "regular_market_change_percent",
+                "regularMarketChangePercent",
+                "changePercent",
+            ),
+        )
+        if change is None and last is not None and previous_close not in (None, 0):
+            change = last - previous_close
+        if change_percent is None and change is not None and previous_close not in (None, 0):
+            change_percent = change / previous_close * 100
+        return QuoteSnapshot(
+            last=last,
             bid=_first_optional_float(fast, info, ("bid", "bidPrice")),
             ask=_first_optional_float(fast, info, ("ask", "askPrice")),
+            change=change,
+            change_percent=change_percent,
             volume=_first_optional_float(
                 fast,
                 info,
                 ("last_volume", "lastVolume", "regularMarketVolume", "volume"),
             ),
+            market_state=_first_optional_string(
+                fast,
+                info,
+                ("market_state", "marketState"),
+            ),
         )
+
+    def _quote_info(self, symbol: str, ticker, include_slow_info: bool) -> dict:
+        cache = getattr(self, "_quote_info_cache", None)
+        if cache is None:
+            cache = {}
+            self._quote_info_cache = cache
+        key = symbol.upper()
+        cached = cache.get(key)
+        now = monotonic()
+        if cached and now - cached[0] < self.quote_info_ttl_seconds:
+            return cached[1]
+        if not include_slow_info:
+            return cached[1] if cached else {}
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = cached[1] if cached else {}
+        cache[key] = (now, info)
+        return info
 
 
 def _unique_instruments(instruments: list[Instrument]) -> list[Instrument]:
@@ -560,6 +629,16 @@ def _first_optional_float(*mappings_and_keys) -> float | None:
             if parsed is not None:
                 return parsed
     return None
+
+
+def _first_optional_string(*mappings_and_keys) -> str:
+    *mappings, keys = mappings_and_keys
+    for key in keys:
+        for mapping in mappings:
+            value = mapping.get(key) if hasattr(mapping, "get") else None
+            if value not in (None, ""):
+                return str(value)
+    return ""
 
 
 def _lookup_isin_by_euronext_listing(symbol: str) -> str:

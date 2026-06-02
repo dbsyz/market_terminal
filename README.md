@@ -77,6 +77,13 @@ OpenFIGI supplies identifier mapping, not prices.
   `portfolio_review\out\fort_pnl_index_levels.csv`; its monitoring helper
   also reads constituents, index summary, and 2026 trade files for
   trade-aware PnL and concentration reporting.
+- When `FORT_PNL` has only a base and latest snapshot level, the chart uses
+  the latest constituent weights as the anchor and fetches fresh Yahoo prices
+  on open to extend the line as a live-estimated current-weight portfolio
+  level. This is not a refreshed broker valuation.
+- Hover the top chart quote line for `FORT_PNL` to inspect constituents,
+  latest available Yahoo prices, their last price dates, weights, and saved
+  snapshot prices.
 
 ## Run
 
@@ -128,6 +135,11 @@ The app charts the index level as a portfolio-index series. The helper
 `build_portfolio_monitor_report()` in `market_terminal.portfolio_index`
 generates top movers, PnL contribution, risk concentration, trade-aware
 activity, realized PnL, and benchmark workflow notes from those files.
+If the index-level file only contains the base and latest snapshot rows, the
+chart synthesizes a current-weight history from Yahoo closes and extends it
+past the snapshot date when newer constituent prices are available. The saved
+snapshot remains the valuation anchor; the extension is best-effort and
+source-labeled.
 
 To point the app at a different output directory:
 

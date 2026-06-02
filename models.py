@@ -48,7 +48,10 @@ class QuoteSnapshot:
     last: float | None = None
     bid: float | None = None
     ask: float | None = None
+    change: float | None = None
+    change_percent: float | None = None
     volume: float | None = None
+    market_state: str = ""
 
 
 INTRADAY_MATRIX = (
