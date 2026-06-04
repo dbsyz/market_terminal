@@ -25,6 +25,7 @@ source was selected, and expose source quality to the user.
 | Source | Current Use | Coverage | Status | Caveats |
 | --- | --- | --- | --- | --- |
 | Yahoo Finance via `yfinance` | Search, chart history, metadata | Equities, ETFs, indices, FX, crypto, funds where Yahoo exposes them | Primary price provider | Unofficial access path; data can be delayed, incomplete, or change without notice. Keep attribution and fallback behavior visible. |
+| Binance Spot public API | Crypto chart history and quotes | Binance-listed spot crypto pairs | Implemented as preferred crypto source | Public market data requires no key, but coverage is exchange-specific and access may be geographically restricted. Yahoo remains fallback for unsupported pairs. |
 | OpenFIGI | Identifier mapping | FIGI, ISIN/CUSIP/ticker mapping and Open Symbology metadata | Implemented for identifier lookup | Free and public, but rate-limited. No prices. |
 | Twelve Data | Optional search/history fallback | Multi-asset market data depending on plan and endpoint | Optional configured provider | Free tier exists but is quota-limited; verify endpoint availability before relying on it. |
 | Stooq | Optional historical fallback | Historical EOD data | Optional configured provider | Existing implementation assumes configured API key; use for historical fallback only unless terms/coverage are revalidated. |
@@ -73,9 +74,9 @@ volume.
 
 | Feature | First Data Sources | Follow-Up Sources |
 | --- | --- | --- |
-| Watchlist | Yahoo/yfinance, OpenFIGI, provider health | Twelve Data, Alpha Vantage, Finnhub |
-| Charting | Yahoo/yfinance, Stooq fallback | Alpha Vantage daily, Twelve Data where free tier allows |
-| Live selected ticker pricing | Yahoo/yfinance quote metadata first | Finnhub/Twelve Data only after free-tier validation |
+| Watchlist | Binance for mapped crypto, Yahoo/yfinance, OpenFIGI, provider health | Twelve Data, Alpha Vantage, Finnhub |
+| Charting | Binance for mapped crypto, Yahoo/yfinance, Stooq fallback | Alpha Vantage daily, Twelve Data where free tier allows |
+| Live selected ticker pricing | Binance for mapped crypto, Yahoo/yfinance quote metadata first | Finnhub/Twelve Data only after free-tier validation |
 | Portfolio analysis | Local portfolio files, Yahoo/yfinance bars | SEC fundamentals, FRED/ECB macro overlays |
 | News section | GDELT DOC API via `news_feed.py`, Finnhub company news if available | NewsAPI for development experiments |
 | AI quick analysis | Local computed indicators, provider provenance, SEC facts, filings, macro series, news snippets | LLM-backed synthesis after source grounding is reliable |
@@ -122,6 +123,7 @@ volume.
 ## Source Links
 
 - Yahoo Finance terms: https://legal.yahoo.com/us/en/yahoo/terms/product-atos/finance/index.html
+- Binance Spot API documentation: https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md
 - OpenFIGI API documentation: https://www.openfigi.com/api/documentation
 - SEC EDGAR APIs: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
 - FRED API documentation: https://fred.stlouisfed.org/docs/api/fred/

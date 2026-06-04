@@ -57,6 +57,58 @@ _YAHOO_TO_EURONEXT_MIC = {
     ".OL": "XOSL",
     ".PA": "XPAR",
 }
+_BINANCE_QUOTES = (
+    "USDT",
+    "FDUSD",
+    "USDC",
+    "BTC",
+    "ETH",
+    "BNB",
+    "EUR",
+    "GBP",
+    "TRY",
+    "BRL",
+    "AUD",
+)
+_BINANCE_DEFAULT_BASES = {
+    "BTC",
+    "ETH",
+    "BNB",
+    "SOL",
+    "XRP",
+    "ADA",
+    "DOGE",
+    "AVAX",
+    "LINK",
+    "DOT",
+    "LTC",
+    "BCH",
+    "TRX",
+    "TON",
+    "SHIB",
+    "UNI",
+    "AAVE",
+}
+_BINANCE_INTERVALS = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "60m": "1h",
+    "1d": "1d",
+    "1wk": "1w",
+    "1mo": "1M",
+}
+_BINANCE_INTERVAL_MS = {
+    "1m": 60_000,
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "30m": 30 * 60_000,
+    "1h": 60 * 60_000,
+    "1d": 24 * 60 * 60_000,
+    "1w": 7 * 24 * 60 * 60_000,
+    "1M": 31 * 24 * 60 * 60_000,
+}
 
 
 @dataclass(frozen=True)
@@ -270,6 +322,121 @@ class StooqClient:
         return frame.dropna(subset=["Close"])
 
 
+class BinanceSpotClient:
+    endpoint = "https://api.binance.com"
+
+    def __init__(self, session: requests.Session | None = None) -> None:
+        self.session = session or requests.Session()
+
+    @property
+    def enabled(self) -> bool:
+        return os.getenv("BINANCE_DISABLE", "0") != "1"
+
+    def search(self, query: str) -> list[Instrument]:
+        symbol = binance_symbol_from_query(query)
+        if not symbol:
+            return []
+        base, quote = split_binance_symbol(symbol)
+        return [
+            Instrument(
+                symbol,
+                f"{base}/{quote} spot",
+                exchange="Binance",
+                quote_type="Crypto",
+                currency=quote,
+                source="Binance Spot",
+            )
+        ]
+
+    def history(
+        self,
+        instrument: Instrument,
+        range_spec: RangeSpec,
+        include_extended_hours: bool = False,
+    ) -> pd.DataFrame:
+        if not self.enabled or range_spec.interval not in _BINANCE_INTERVALS:
+            return pd.DataFrame()
+        symbol = binance_symbol_from_instrument(instrument)
+        if not symbol:
+            return pd.DataFrame()
+        interval = _BINANCE_INTERVALS[range_spec.interval]
+        rows = self._klines(symbol, interval, range_spec)
+        if not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame(
+            rows,
+            columns=(
+                "open_time",
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume",
+                "close_time",
+                "quote_volume",
+                "trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "unused",
+            ),
+        )
+        frame.index = pd.to_datetime(frame.pop("open_time"), unit="ms", utc=True)
+        for column in ("Open", "High", "Low", "Close", "Volume"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        result = frame[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+        result.attrs["data_source"] = "Binance Spot"
+        result.attrs["binance_symbol"] = symbol
+        return result
+
+    def quote_snapshot(self, instrument: Instrument) -> QuoteSnapshot:
+        symbol = binance_symbol_from_instrument(instrument)
+        if not self.enabled or not symbol:
+            raise RuntimeError("Instrument is not a Binance spot crypto pair")
+        response = self.session.get(
+            f"{self.endpoint}/api/v3/ticker/24hr",
+            params={"symbol": symbol},
+            timeout=12,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return QuoteSnapshot(
+            last=_as_optional_float(payload.get("lastPrice")),
+            bid=_as_optional_float(payload.get("bidPrice")),
+            ask=_as_optional_float(payload.get("askPrice")),
+            change=_as_optional_float(payload.get("priceChange")),
+            change_percent=_as_optional_float(payload.get("priceChangePercent")),
+            volume=_as_optional_float(payload.get("volume")),
+            market_state="OPEN - 24/7 CRYPTO",
+        )
+
+    def _klines(self, symbol: str, interval: str, range_spec: RangeSpec) -> list[list]:
+        start, end = _binance_time_bounds(range_spec)
+        rows: list[list] = []
+        next_start = start
+        while True:
+            params = {"symbol": symbol, "interval": interval, "limit": 1000}
+            if next_start is not None:
+                params["startTime"] = next_start
+            if end is not None:
+                params["endTime"] = end
+            response = self.session.get(
+                f"{self.endpoint}/api/v3/klines",
+                params=params,
+                timeout=12,
+            )
+            response.raise_for_status()
+            batch = response.json()
+            if not batch:
+                break
+            rows.extend(batch)
+            if next_start is None or len(batch) < 1000:
+                break
+            next_start = int(batch[-1][0]) + _BINANCE_INTERVAL_MS[interval]
+            if end is not None and next_start > end:
+                break
+        return rows
+
+
 class MarketDataProvider:
     quote_info_ttl_seconds = 60.0
 
@@ -278,11 +445,13 @@ class MarketDataProvider:
         figi: OpenFigiClient | None = None,
         twelve: TwelveDataClient | None = None,
         stooq: StooqClient | None = None,
+        binance: BinanceSpotClient | None = None,
     ) -> None:
         configure_yfinance_cache()
         self.figi = figi or OpenFigiClient()
         self.twelve = twelve or TwelveDataClient()
         self.stooq = stooq or StooqClient()
+        self.binance = binance or BinanceSpotClient()
         self._quote_info_cache: dict[str, tuple[float, dict]] = {}
 
     def search(self, query: str) -> list[Instrument]:
@@ -329,6 +498,9 @@ class MarketDataProvider:
                 )
             return _unique_instruments(enriched or mapped)
         instruments: list[Instrument] = []
+        binance = getattr(self, "binance", None)
+        if binance is not None and binance.enabled:
+            instruments.extend(binance.search(query))
         yahoo_symbol = yahoo_symbol_from_terminal_query(query)
         if yahoo_symbol:
             try:
@@ -423,6 +595,9 @@ class MarketDataProvider:
         if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
             return load_portfolio_index_history(range_spec)
         attempts = [self._history_yahoo]
+        binance = getattr(self, "binance", None)
+        if binance is not None and binance.enabled and binance_symbol_from_instrument(instrument):
+            attempts.insert(0, binance.history)
         if self.twelve.enabled:
             attempts.append(self.twelve.history)
         if self.stooq.enabled:
@@ -489,6 +664,16 @@ class MarketDataProvider:
     def market_session(self, instrument: Instrument) -> MarketSession:
         if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
             return portfolio_market_session()
+        binance = getattr(self, "binance", None)
+        if binance is not None and binance.enabled and binance_symbol_from_instrument(instrument):
+            return MarketSession(
+                status="OPEN - 24/7 CRYPTO",
+                exchange_timezone="UTC",
+                regular_exchange_hours="Always open",
+                regular_local_hours="Always open",
+                extended_session="Not applicable",
+                overnight_session="Trades continuously",
+            )
         metadata = yf.Ticker(instrument.symbol).get_history_metadata()
         return build_market_session(metadata)
 
@@ -515,6 +700,12 @@ class MarketDataProvider:
                 volume=volume,
                 market_state="LOCAL INDEX",
             )
+        binance = getattr(self, "binance", None)
+        if binance is not None and binance.enabled and binance_symbol_from_instrument(instrument):
+            try:
+                return binance.quote_snapshot(instrument)
+            except Exception:
+                pass
         ticker = yf.Ticker(instrument.symbol)
         try:
             fast = dict(ticker.fast_info or {})
@@ -639,6 +830,67 @@ def _first_optional_string(*mappings_and_keys) -> str:
             if value not in (None, ""):
                 return str(value)
     return ""
+
+
+def binance_symbol_from_query(query: str) -> str:
+    value = query.strip().upper().replace("/", "-").replace(" ", "")
+    if not value:
+        return ""
+    if "-" in value:
+        base, quote = value.split("-", 1)
+        quote = "USDT" if quote == "USD" else quote
+        if base and quote in _BINANCE_QUOTES and base.isalnum():
+            return f"{base}{quote}"
+        return ""
+    for quote in _BINANCE_QUOTES:
+        if len(value) > len(quote) and value.endswith(quote):
+            base = value[: -len(quote)]
+            if base.isalnum():
+                return value
+    if value in _BINANCE_DEFAULT_BASES:
+        return f"{value}USDT"
+    return ""
+
+
+def binance_symbol_from_instrument(instrument: Instrument) -> str:
+    if instrument.source == "Binance Spot" or instrument.exchange.upper() == "BINANCE":
+        return binance_symbol_from_query(instrument.symbol)
+    quote_type = instrument.quote_type.upper()
+    symbol = instrument.symbol.upper()
+    if "CRYPTO" in quote_type or "-" in symbol or "/" in symbol:
+        return binance_symbol_from_query(symbol)
+    return ""
+
+
+def split_binance_symbol(symbol: str) -> tuple[str, str]:
+    for quote in _BINANCE_QUOTES:
+        if len(symbol) > len(quote) and symbol.endswith(quote):
+            return symbol[: -len(quote)], quote
+    return symbol, ""
+
+
+def _binance_time_bounds(range_spec: RangeSpec) -> tuple[int | None, int | None]:
+    if range_spec.start and range_spec.end:
+        start = pd.Timestamp(range_spec.start, tz="UTC")
+        end = pd.Timestamp(range_spec.end, tz="UTC") + pd.Timedelta(days=1)
+        return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+    if range_spec.period == "max":
+        return None, None
+    now = pd.Timestamp.now(tz="UTC")
+    if range_spec.period == "ytd":
+        start = pd.Timestamp(f"{now.year}-01-01", tz="UTC")
+    else:
+        offsets = {
+            "1d": pd.Timedelta(days=1),
+            "5d": pd.Timedelta(days=5),
+            "1mo": pd.DateOffset(months=1),
+            "3mo": pd.DateOffset(months=3),
+            "6mo": pd.DateOffset(months=6),
+            "1y": pd.DateOffset(years=1),
+            "5y": pd.DateOffset(years=5),
+        }
+        start = now - offsets.get(range_spec.period, pd.DateOffset(months=3))
+    return int(start.timestamp() * 1000), int(now.timestamp() * 1000)
 
 
 def _lookup_isin_by_euronext_listing(symbol: str) -> str:

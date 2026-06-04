@@ -8,6 +8,8 @@ import matplotlib.dates as mdates
 import pandas as pd
 
 from market_terminal.app import (
+    DOWN,
+    UP,
     anchored_text_bounds,
     calculate_return,
     calculate_beta_model,
@@ -21,6 +23,7 @@ from market_terminal.app import (
     fit_popup_to_window,
     format_market_cap,
     format_probability,
+    format_quote_value,
     instrument_fundamentals_text,
     instrument_from_watchlist_row,
     instrument_identity_text,
@@ -28,9 +31,12 @@ from market_terminal.app import (
     load_window_geometry,
     load_window_state,
     load_layout_state,
+    normalized_watchlist_column_widths,
     normalized_rectangle,
     ordered_text_blocks,
+    price_move_color,
     prepare_comparison_frames,
+    quote_change_tag,
     rectangle_is_drag,
     rectangles_intersect,
     save_window_geometry,
@@ -39,7 +45,11 @@ from market_terminal.app import (
     source_file_snapshot,
     technical_indicator,
     technical_study_label,
+    watchlist_asset_label,
+    watchlist_heading_height,
+    watchlist_item_tags,
     watchlist_row_from_instrument,
+    watchlist_row_stripe,
 )
 from market_terminal.models import HISTORICAL_RANGES, INTRADAY_MATRIX, Instrument
 
@@ -50,6 +60,69 @@ class ReturnCalculationTests(unittest.TestCase):
 
     def test_zero_start_price_keeps_percentage_defined(self) -> None:
         self.assertEqual(calculate_return(0.0, 4.0), (4.0, 0.0))
+
+
+class MoveColorTests(unittest.TestCase):
+    def test_price_move_color_uses_latest_close_change(self) -> None:
+        up = pd.DataFrame({"Close": [100.0, 101.0]})
+        down = pd.DataFrame({"Close": [100.0, 99.0]})
+
+        self.assertEqual(price_move_color(up, "#fallback"), UP)
+        self.assertEqual(price_move_color(down, "#fallback"), DOWN)
+
+    def test_price_move_color_keeps_fallback_without_a_directional_move(self) -> None:
+        flat = pd.DataFrame({"Close": [100.0, 100.0]})
+        sparse = pd.DataFrame({"Close": [100.0]})
+
+        self.assertEqual(price_move_color(flat, "#fallback"), "#fallback")
+        self.assertEqual(price_move_color(sparse, "#fallback"), "#fallback")
+
+    def test_quote_change_tag_uses_daily_change_when_no_tick_direction_exists(self) -> None:
+        self.assertEqual(quote_change_tag(1.0, None), "tick_up")
+        self.assertEqual(quote_change_tag(None, -0.5), "tick_down")
+        self.assertEqual(quote_change_tag(0.0, 0.0), "tick_flat")
+
+    def test_watchlist_item_tags_keep_row_stripe_and_tick_direction_separate(self) -> None:
+        self.assertEqual(watchlist_row_stripe(0), "watchlist_even")
+        self.assertEqual(watchlist_row_stripe(1), "watchlist_odd")
+        self.assertEqual(watchlist_item_tags(1, "tick_down"), ("watchlist_odd", "tick_down"))
+
+    def test_watchlist_asset_label_uses_ticker_only(self) -> None:
+        self.assertEqual(
+            watchlist_asset_label(Instrument("AAPL", "Apple Inc.", exchange="NASDAQ")),
+            "AAPL",
+        )
+        self.assertEqual(watchlist_asset_label(Instrument("BTCUSDT", "BTC/USDT")), "BTCUSDT")
+
+    def test_quote_values_are_rounded_to_two_decimals(self) -> None:
+        self.assertEqual(format_quote_value(1.2345), "1.23")
+        self.assertEqual(format_quote_value(1234.567), "1,234.57")
+
+    def test_watchlist_heading_height_uses_first_row_y_offset(self) -> None:
+        class TreeStub:
+            def get_children(self):
+                return ("row1",)
+
+            def bbox(self, _item):
+                return (0, 28, 100, 27)
+
+        self.assertEqual(watchlist_heading_height(TreeStub()), 28)
+
+    def test_watchlist_column_widths_keep_valid_saved_values(self) -> None:
+        widths = normalized_watchlist_column_widths(
+            {"asset": "170", "last": 92, "bid": 10, "unknown": 400}
+        )
+
+        self.assertEqual(widths["asset"], 170)
+        self.assertEqual(widths["last"], 92)
+        self.assertEqual(widths["bid"], 70)
+        self.assertNotIn("unknown", widths)
+
+    def test_watchlist_column_widths_fall_back_for_invalid_layout(self) -> None:
+        widths = normalized_watchlist_column_widths(None)
+
+        self.assertEqual(widths["asset"], 125)
+        self.assertEqual(widths["change"], 80)
 
 
 class ChartDateBoundsTests(unittest.TestCase):

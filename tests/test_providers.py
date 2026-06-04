@@ -8,13 +8,16 @@ from pathlib import Path
 
 import market_terminal.portfolio_index as portfolio_index
 from market_terminal.models import HISTORICAL_RANGES, INTRADAY_RANGES, Instrument, RangeSpec
+from market_terminal.models import QuoteSnapshot
 from market_terminal.portfolio_index import _first_trade_date, build_portfolio_monitor_report, portfolio_index_files
 from market_terminal.providers import (
+    BinanceSpotClient,
     MarketDataProvider,
     OpenFigiClient,
     StooqClient,
     TwelveDataClient,
     _unique_instruments,
+    binance_symbol_from_query,
     build_market_session,
     detect_identifier,
     score_history_frame,
@@ -38,6 +41,14 @@ class IdentifierDetectionTests(unittest.TestCase):
         self.assertEqual(yahoo_symbol_from_terminal_query("KRW FP"), "KRW.PA")
         self.assertEqual(yahoo_symbol_from_terminal_query("KRW FP Equity"), "KRW.PA")
         self.assertIsNone(yahoo_symbol_from_terminal_query("KRW ZZ"))
+
+    def test_translates_crypto_symbols_to_binance_spot_pairs(self) -> None:
+        self.assertEqual(binance_symbol_from_query("BTC-USD"), "BTCUSDT")
+        self.assertEqual(binance_symbol_from_query("ETH/EUR"), "ETHEUR")
+        self.assertEqual(binance_symbol_from_query("SOL"), "SOLUSDT")
+        self.assertEqual(binance_symbol_from_query("BTCUSDT"), "BTCUSDT")
+        self.assertEqual(binance_symbol_from_query("AAPL"), "")
+        self.assertEqual(binance_symbol_from_query("BRK-B"), "")
 
     def test_de_duplicates_symbols_without_reordering(self) -> None:
         apple = Instrument("AAPL", "Apple")
@@ -303,6 +314,102 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertIn("live-estimated", frame.attrs["data_source"])
         self.assertEqual(frame.attrs["portfolio_snapshot_date"], "2026-05-31")
 
+    def test_local_fort_pnl_appends_market_extension_after_latest_official_level(self) -> None:
+        prices = pd.DataFrame(
+            {
+                "AAA": [0.72, 0.78],
+                "BBB": [0.48, 0.52],
+            },
+            index=pd.to_datetime(["2026-05-29", "2026-06-02"]),
+        )
+
+        def download_stub(_constituents, _start, _as_of):
+            return prices
+
+        with temporary_portfolio_index_dir() as out_dir:
+            (out_dir / "fort_pnl_index_levels.csv").write_text(
+                "\n".join(
+                    [
+                        "index_name,date,index_level,note",
+                        "FORT_PNL,2026-01-01,100,Base level",
+                        "FORT_PNL,2026-03-31,110,Official quarter level",
+                        "FORT_PNL,2026-05-31,123.5,Latest official level",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            original = os.environ.get("FORT_PNL_OUT_DIR")
+            original_download = portfolio_index._download_weighted_constituent_prices
+            original_current_date = portfolio_index._current_date
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            portfolio_index._download_weighted_constituent_prices = download_stub
+            portfolio_index._current_date = lambda: pd.Timestamp("2026-06-02")
+            try:
+                provider = MarketDataProvider.__new__(MarketDataProvider)
+                frame = provider.history(Instrument("FORT_PNL", "FORT PNL"), HISTORICAL_RANGES[-1])
+            finally:
+                portfolio_index._download_weighted_constituent_prices = original_download
+                portfolio_index._current_date = original_current_date
+                if original is None:
+                    os.environ.pop("FORT_PNL_OUT_DIR", None)
+                else:
+                    os.environ["FORT_PNL_OUT_DIR"] = original
+
+        self.assertEqual(frame.index[-1], pd.Timestamp("2026-06-02"))
+        self.assertEqual(float(frame.loc[pd.Timestamp("2026-05-31"), "Close"]), 123.5)
+        self.assertGreater(float(frame["Close"].iloc[-1]), 123.5)
+        self.assertIn("live-estimated", frame.attrs["data_source"])
+        self.assertEqual(frame.attrs["portfolio_snapshot_date"], "2026-05-31")
+
+    def test_local_fort_pnl_refreshes_outputs_when_pt_xls_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out_dir = root / "out"
+            out_dir.mkdir()
+            with temporary_portfolio_index_dir() as source_out:
+                for path in source_out.iterdir():
+                    (out_dir / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            workbook = root / "pt.xls"
+            workbook.write_text("newer workbook", encoding="utf-8")
+            os.utime(workbook, (4_000_000_000, 4_000_000_000))
+            exporter = root / "export_fort_pnl_index.py"
+            exporter.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            calls = []
+
+            def run_stub(command, **kwargs):
+                calls.append((command, kwargs))
+                return None
+
+            original_out = os.environ.get("FORT_PNL_OUT_DIR")
+            original_root = os.environ.get("FORT_PNL_ROOT")
+            original_run = portfolio_index.subprocess.run
+            original_download = portfolio_index._download_weighted_constituent_prices
+            original_disable = os.environ.get("FORT_PNL_DISABLE_SYNTHETIC_HISTORY")
+            os.environ["FORT_PNL_OUT_DIR"] = str(out_dir)
+            os.environ["FORT_PNL_ROOT"] = str(root)
+            os.environ["FORT_PNL_DISABLE_SYNTHETIC_HISTORY"] = "1"
+            portfolio_index.subprocess.run = run_stub
+            portfolio_index._download_weighted_constituent_prices = lambda *_args: pd.DataFrame()
+            try:
+                provider = MarketDataProvider.__new__(MarketDataProvider)
+                frame = provider.history(Instrument("FORT_PNL", "FORT PNL"), HISTORICAL_RANGES[-1])
+            finally:
+                portfolio_index.subprocess.run = original_run
+                portfolio_index._download_weighted_constituent_prices = original_download
+                for key, value in (
+                    ("FORT_PNL_OUT_DIR", original_out),
+                    ("FORT_PNL_ROOT", original_root),
+                    ("FORT_PNL_DISABLE_SYNTHETIC_HISTORY", original_disable),
+                ):
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("export_fort_pnl_index.py", str(calls[0][0][1]))
+        self.assertEqual(frame.attrs["portfolio_refresh_status"], "Refreshed FORT_PNL CSVs from latest pt.xls")
+
     def test_local_fort_pnl_constituent_quotes_use_latest_available_closes(self) -> None:
         closes = pd.DataFrame(
             {
@@ -552,8 +659,109 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertGreater(frame.attrs["quality"].score, 90)
         self.assertEqual(len(frame.attrs["quality_candidates"]), 2)
 
+    def test_crypto_history_prefers_binance_spot_when_available(self) -> None:
+        recent_end = pd.Timestamp.now(tz="UTC").normalize()
+        recent_start = recent_end - pd.Timedelta(days=2)
+
+        class BinanceStub:
+            enabled = True
+
+            def history(self, instrument, range_spec, include_extended_hours=False):
+                frame = _quality_frame(recent_start, recent_end)
+                frame.attrs["data_source"] = "Binance Spot"
+                return frame
+
+        class TwelveStub:
+            enabled = False
+
+        class StooqStub:
+            enabled = False
+
+        provider = MarketDataProvider.__new__(MarketDataProvider)
+        provider.binance = BinanceStub()
+        provider.twelve = TwelveStub()
+        provider.stooq = StooqStub()
+        provider._history_yahoo = lambda *args: pd.DataFrame()
+
+        frame = provider.history(
+            Instrument("BTC-USD", "Bitcoin", quote_type="Cryptocurrency"), HISTORICAL_RANGES[0]
+        )
+
+        self.assertEqual(frame.attrs["data_source"], "Binance Spot")
+
+    def test_crypto_quote_prefers_binance_spot_when_available(self) -> None:
+        class BinanceStub:
+            enabled = True
+
+            def quote_snapshot(self, instrument):
+                return QuoteSnapshot(last=101.0, change_percent=1.5, market_state="OPEN - 24/7 CRYPTO")
+
+        provider = MarketDataProvider.__new__(MarketDataProvider)
+        provider.binance = BinanceStub()
+
+        quote = provider.quote_snapshot(Instrument("BTC-USD", "Bitcoin", quote_type="Crypto"))
+
+        self.assertEqual(quote.last, 101.0)
+        self.assertEqual(quote.market_state, "OPEN - 24/7 CRYPTO")
+
 
 class FreeSourceAdapterTests(unittest.TestCase):
+    def test_binance_parses_spot_klines_with_attribution(self) -> None:
+        session = GetSession(
+            RequestResponse(
+                json_payload=[
+                    [
+                        1_775_000_000_000,
+                        "100.0",
+                        "102.0",
+                        "99.0",
+                        "101.0",
+                        "12.5",
+                        1_775_000_059_999,
+                        "1262.5",
+                        10,
+                        "6",
+                        "606",
+                        "0",
+                    ]
+                ]
+            )
+        )
+
+        frame = BinanceSpotClient(session=session).history(
+            Instrument("BTC-USD", "Bitcoin", quote_type="Crypto"), INTRADAY_RANGES[0]
+        )
+
+        self.assertEqual(float(frame["Close"].iloc[0]), 101.0)
+        self.assertEqual(frame.attrs["data_source"], "Binance Spot")
+        self.assertEqual(frame.attrs["binance_symbol"], "BTCUSDT")
+        self.assertEqual(session.request[1]["symbol"], "BTCUSDT")
+        self.assertEqual(session.request[1]["interval"], "1m")
+
+    def test_binance_parses_24h_ticker_quote(self) -> None:
+        session = GetSession(
+            RequestResponse(
+                json_payload={
+                    "lastPrice": "101.0",
+                    "bidPrice": "100.9",
+                    "askPrice": "101.1",
+                    "priceChange": "1.0",
+                    "priceChangePercent": "1.0",
+                    "volume": "12.5",
+                }
+            )
+        )
+
+        quote = BinanceSpotClient(session=session).quote_snapshot(
+            Instrument("BTCUSDT", "BTC/USDT", exchange="Binance", quote_type="Crypto")
+        )
+
+        self.assertEqual(quote.last, 101.0)
+        self.assertEqual(quote.bid, 100.9)
+        self.assertEqual(quote.ask, 101.1)
+        self.assertEqual(quote.change_percent, 1.0)
+        self.assertEqual(quote.market_state, "OPEN - 24/7 CRYPTO")
+
     def test_stooq_parses_daily_fallback_bars_with_attribution(self) -> None:
         session = GetSession(
             RequestResponse(

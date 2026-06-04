@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,13 +87,27 @@ def search_portfolio_index(query: str) -> list[Instrument]:
 
 def load_portfolio_index_history(range_spec: RangeSpec) -> pd.DataFrame:
     files = portfolio_index_files()
+    refresh_status = _refresh_portfolio_outputs_from_pt_if_stale(files)
     levels = pd.read_csv(files.levels)
     if levels.empty:
         return pd.DataFrame()
-    if len(levels) <= 2 and os.getenv("FORT_PNL_DISABLE_SYNTHETIC_HISTORY") != "1":
-        synthetic = _build_current_weight_index_history(files, levels)
+    local = _build_local_index_history(files, levels)
+    if os.getenv("FORT_PNL_DISABLE_SYNTHETIC_HISTORY") != "1":
+        synthetic = (
+            _build_current_weight_index_history(files, levels)
+            if len(levels) <= 2
+            else _extend_index_history_from_latest_level(files, local)
+        )
         if not synthetic.empty:
+            if refresh_status:
+                synthetic.attrs["portfolio_refresh_status"] = refresh_status
             return _clip_index_history(synthetic, range_spec)
+    if refresh_status:
+        local.attrs["portfolio_refresh_status"] = refresh_status
+    return _clip_index_history(local, range_spec)
+
+
+def _build_local_index_history(files: PortfolioIndexFiles, levels: pd.DataFrame) -> pd.DataFrame:
     index_levels = pd.to_numeric(levels["index_level"], errors="coerce").to_numpy()
     frame = pd.DataFrame(
         {
@@ -106,7 +122,7 @@ def load_portfolio_index_history(range_spec: RangeSpec) -> pd.DataFrame:
     frame = frame.sort_index()
     frame = _attach_trade_cash_columns(frame, files)
     frame.attrs["data_source"] = "FORT_PNL local index levels"
-    return _clip_index_history(frame, range_spec)
+    return frame
 
 
 def portfolio_market_session() -> MarketSession:
@@ -216,6 +232,46 @@ def _portfolio_market_value() -> float | None:
     return _as_optional_float(summary.get("market_value_eur"))
 
 
+def _refresh_portfolio_outputs_from_pt_if_stale(files: PortfolioIndexFiles) -> str | None:
+    if os.getenv("FORT_PNL_AUTO_REFRESH_PT", "1") == "0":
+        return None
+    root = Path(os.getenv("FORT_PNL_ROOT", str(files.levels.parent.parent)))
+    expected_out = root / "out"
+    try:
+        if expected_out.resolve() != files.levels.parent.resolve():
+            return None
+    except OSError:
+        return None
+
+    workbook = Path(os.getenv("FORT_PNL_PT_XLS", str(root / "pt.xls")))
+    exporter = Path(
+        os.getenv("FORT_PNL_EXPORT_SCRIPT", str(root / "export_fort_pnl_index.py"))
+    )
+    outputs = (files.constituents, files.summary, files.levels)
+    if not workbook.exists() or not exporter.exists():
+        return None
+    try:
+        workbook_mtime = workbook.stat().st_mtime
+        output_mtimes = [path.stat().st_mtime for path in outputs if path.exists()]
+    except OSError as exc:
+        return f"pt.xls refresh skipped: {exc}"
+    if len(output_mtimes) == len(outputs) and workbook_mtime <= min(output_mtimes):
+        return None
+
+    try:
+        subprocess.run(
+            [sys.executable, str(exporter)],
+            cwd=str(root),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except Exception as exc:
+        return f"pt.xls refresh failed: {exc}"
+    return "Refreshed FORT_PNL CSVs from latest pt.xls"
+
+
 def _build_current_weight_index_history(
     files: PortfolioIndexFiles, levels: pd.DataFrame
 ) -> pd.DataFrame:
@@ -260,6 +316,53 @@ def _build_current_weight_index_history(
         frame.attrs["data_source"] = "FORT_PNL synthesized current-weight constituent history"
     frame.attrs["portfolio_snapshot_date"] = snapshot_date.date().isoformat()
     return frame.dropna(subset=["Close"])
+
+
+def _extend_index_history_from_latest_level(
+    files: PortfolioIndexFiles, local: pd.DataFrame
+) -> pd.DataFrame:
+    if local.empty:
+        return pd.DataFrame()
+    snapshot_date = pd.Timestamp(local.index.max()).normalize()
+    live_end = max(snapshot_date, _current_date())
+    if live_end <= snapshot_date:
+        return pd.DataFrame()
+    latest_level = float(local.loc[local.index.max(), "Close"])
+    start = snapshot_date - pd.Timedelta(days=10)
+    constituents = _read_constituents(files.constituents)
+    weighted_prices = _download_weighted_constituent_prices(constituents, start, live_end)
+    weighted_prices = weighted_prices.dropna(how="all")
+    if weighted_prices.empty:
+        return pd.DataFrame()
+    raw_path = weighted_prices.sum(axis=1).dropna()
+    base_price = _latest_at_or_before(raw_path, snapshot_date)
+    if base_price in (None, 0):
+        return pd.DataFrame()
+    extension = latest_level * raw_path / float(base_price)
+    extension = extension.loc[extension.index.normalize() > snapshot_date]
+    if extension.empty:
+        return pd.DataFrame()
+    extension_frame = pd.DataFrame(
+        {
+            "Open": extension.to_numpy(),
+            "High": extension.to_numpy(),
+            "Low": extension.to_numpy(),
+            "Close": extension.to_numpy(),
+            "Volume": 0.0,
+        },
+        index=extension.index,
+    )
+    combined = pd.concat([local, extension_frame]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    combined = _attach_trade_cash_columns(combined, files)
+    combined.attrs["data_source"] = (
+        "FORT_PNL live-estimated current-weight extension via Yahoo Finance"
+    )
+    combined.attrs["portfolio_snapshot_date"] = snapshot_date.date().isoformat()
+    combined.attrs["portfolio_estimate_note"] = (
+        "Yahoo estimate uses latest saved FORT_PNL weights; update pt.xls for newer weights."
+    )
+    return combined.dropna(subset=["Close"])
 
 
 def _current_date() -> pd.Timestamp:

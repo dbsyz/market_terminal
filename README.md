@@ -2,13 +2,15 @@
 
 A desktop charting workspace for intraday and historical market views. It
 searches equities, funds, indices, currencies,
-cryptocurrencies, and other assets exposed through Yahoo Finance, then plots a
-fast price-and-volume chart in a native desktop window.
+cryptocurrencies, and other assets exposed through public/free providers, then
+plots a fast price-and-volume chart in a native desktop window.
 
 This is not a Bloomberg Terminal replacement or a licensed real-time feed.
 Yahoo Finance data may be delayed, incomplete, or unavailable for some
 instruments; confirm Yahoo's terms before any non-personal or production use.
-OpenFIGI supplies identifier mapping, not prices.
+Binance Spot is preferred for Binance-listed crypto pairs when symbols can be
+mapped to public spot pairs such as `BTCUSDT`. OpenFIGI supplies identifier
+mapping, not prices.
 
 ## Features
 
@@ -77,10 +79,11 @@ OpenFIGI supplies identifier mapping, not prices.
   `portfolio_review\out\fort_pnl_index_levels.csv`; its monitoring helper
   also reads constituents, index summary, and 2026 trade files for
   trade-aware PnL and concentration reporting.
-- When `FORT_PNL` has only a base and latest snapshot level, the chart uses
-  the latest constituent weights as the anchor and fetches fresh Yahoo prices
-  on open to extend the line as a live-estimated current-weight portfolio
-  level. This is not a refreshed broker valuation.
+- When `FORT_PNL` opens, the app checks whether `portfolio_review\pt.xls` is
+  newer than the generated portfolio CSVs and reruns the local exporter when
+  needed. The chart then uses the latest saved constituent weights as the
+  anchor and fetches fresh Yahoo prices to extend the line as a live-estimated
+  current-weight portfolio level. This is not a refreshed broker valuation.
 - Hover the top chart quote line for `FORT_PNL` to inspect constituents,
   latest available Yahoo prices, their last price dates, weights, and saved
   snapshot prices.
@@ -102,6 +105,10 @@ python market_terminal\run.py
 
 Enter examples such as `AAPL`, `Apple`, `EURUSD=X`, `BTC-USD`,
 `US0378331005` (ISIN), `037833100` (CUSIP), or `FORT_PNL`.
+Crypto pairs that clearly map to Binance Spot, including `BTC-USD`, `ETH-USD`,
+and `BTCUSDT`, use Binance public market data first for chart history and
+watchlist quotes, with Yahoo Finance remaining as fallback. Set
+`BINANCE_DISABLE=1` to force the existing non-Binance provider path.
 
 ## Agentic Loop
 
@@ -135,11 +142,14 @@ The app charts the index level as a portfolio-index series. The helper
 `build_portfolio_monitor_report()` in `market_terminal.portfolio_index`
 generates top movers, PnL contribution, risk concentration, trade-aware
 activity, realized PnL, and benchmark workflow notes from those files.
-If the index-level file only contains the base and latest snapshot rows, the
-chart synthesizes a current-weight history from Yahoo closes and extends it
-past the snapshot date when newer constituent prices are available. The saved
-snapshot remains the valuation anchor; the extension is best-effort and
-source-labeled.
+On open, the app refreshes the generated portfolio CSVs from
+`portfolio_review\pt.xls` when that workbook is newer than the output files.
+It then extends the chart past the latest official snapshot with Yahoo closes
+when newer constituent prices are available. If the index-level file only
+contains the base and latest snapshot rows, the chart can synthesize the
+visible current-weight path from Yahoo closes. The saved snapshot remains the
+valuation anchor; the extension is best-effort and source-labeled. Set
+`FORT_PNL_AUTO_REFRESH_PT=0` to disable the automatic `pt.xls` refresh.
 
 To point the app at a different output directory:
 

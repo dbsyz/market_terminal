@@ -57,6 +57,19 @@ TEXT = "#e8edf2"
 MUTED = "#a7b3be"
 UP = "#38c172"
 DOWN = "#ef5350"
+WATCHLIST_ROW_EVEN = "#10161c"
+WATCHLIST_ROW_ODD = "#1b242c"
+TERMINAL_FONT_FAMILY = "Cascadia Mono"
+WATCHLIST_COLUMNS = (
+    ("asset", "Asset", 125),
+    ("last", "Last", 70),
+    ("bid", "Bid", 70),
+    ("ask", "Ask", 70),
+    ("change", "Chg", 80),
+    ("volume", "Volume", 75),
+    ("latency", "Latency", 65),
+)
+WATCHLIST_MIN_COLUMN_WIDTH = 35
 SERIES_COLORS = (
     "#f6a400",
     "#42a5f5",
@@ -243,7 +256,7 @@ class MarketTerminalApp(tk.Tk):
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure(".", background=BG, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure(".", background=BG, foreground=TEXT, font=(TERMINAL_FONT_FAMILY, 10))
         style.configure("Panel.TFrame", background=PANEL)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Status.TLabel", background=BG, foreground=MUTED)
@@ -251,19 +264,19 @@ class MarketTerminalApp(tk.Tk):
             "Clock.TLabel",
             background=BG,
             foreground=TEXT,
-            font=("Consolas", 10, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
         )
         style.configure(
             "Update.TLabel",
             background=ORANGE,
             foreground=BG,
-            font=("Segoe UI", 10, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
         )
         style.configure(
-            "Title.TLabel", background=BG, foreground=ORANGE, font=("Consolas", 17, "bold")
+            "Title.TLabel", background=BG, foreground=ORANGE, font=(TERMINAL_FONT_FAMILY, 17, "bold")
         )
         style.configure(
-            "Quote.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 12, "bold")
+            "Quote.TLabel", background=BG, foreground=TEXT, font=(TERMINAL_FONT_FAMILY, 12, "bold")
         )
         style.configure(
             "TButton",
@@ -278,7 +291,7 @@ class MarketTerminalApp(tk.Tk):
             background=ORANGE,
             foreground=BG,
             bordercolor=ORANGE,
-            font=("Segoe UI", 10, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
         )
         style.map("Accent.TButton", background=[("active", "#ffc247")])
         style.configure(
@@ -287,7 +300,7 @@ class MarketTerminalApp(tk.Tk):
             foreground=MUTED,
             bordercolor=GRID,
             padding=(9, 5),
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         style.map("Chip.TButton", background=[("active", GRID)], foreground=[("active", TEXT)])
         style.configure(
@@ -296,7 +309,7 @@ class MarketTerminalApp(tk.Tk):
             foreground=BG,
             bordercolor=ORANGE,
             padding=(9, 5),
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         style.map("Selected.Chip.TButton", background=[("active", "#ffc247")])
         style.configure(
@@ -305,7 +318,7 @@ class MarketTerminalApp(tk.Tk):
             foreground=TEXT,
             bordercolor=GRID,
             padding=(7, 5),
-            font=("Segoe UI", 9),
+            font=(TERMINAL_FONT_FAMILY, 9),
         )
         style.map("Flyout.TButton", background=[("active", GRID)])
         style.configure(
@@ -314,7 +327,7 @@ class MarketTerminalApp(tk.Tk):
             foreground=BG,
             bordercolor=ORANGE,
             padding=(7, 5),
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         style.configure(
             "Treeview",
@@ -324,6 +337,24 @@ class MarketTerminalApp(tk.Tk):
             rowheight=27,
         )
         style.configure("Treeview.Heading", background=GRID, foreground=TEXT)
+        style.configure(
+            "Watchlist.Treeview",
+            background=WATCHLIST_ROW_ODD,
+            fieldbackground=WATCHLIST_ROW_ODD,
+            foreground=TEXT,
+            bordercolor=GRID,
+            borderwidth=1,
+            relief=tk.SOLID,
+            rowheight=27,
+        )
+        style.configure(
+            "Watchlist.Treeview.Heading",
+            background=GRID,
+            foreground=TEXT,
+            bordercolor=BG,
+            borderwidth=1,
+            relief=tk.RAISED,
+        )
         style.map("Treeview", background=[("selected", ORANGE)], foreground=[("selected", BG)])
         style.configure("TCheckbutton", background=BG, foreground=MUTED)
         style.configure(
@@ -332,7 +363,7 @@ class MarketTerminalApp(tk.Tk):
             foreground=MUTED,
             indicatorcolor=PANEL,
             padding=(8, 5),
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         style.map(
             "Chip.TCheckbutton",
@@ -395,7 +426,7 @@ class MarketTerminalApp(tk.Tk):
             text="CHART",
             bg=GRID,
             fg=TEXT,
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
             padx=9,
         )
         title_label.pack(side=tk.LEFT)
@@ -414,7 +445,7 @@ class MarketTerminalApp(tk.Tk):
             fg=TEXT,
             insertbackground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 10),
+            font=(TERMINAL_FONT_FAMILY, 10),
         )
         self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4, padx=(6, 8), pady=3)
         self.search_entry.bind("<Return>", self._accept_or_search)
@@ -434,7 +465,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=8,
             pady=2,
         ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
@@ -567,7 +598,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground="#ffc247",
             activeforeground=BG,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=2,
             pady=0,
             width=1,
@@ -904,7 +935,7 @@ class MarketTerminalApp(tk.Tk):
             text="WATCHLIST",
             bg=GRID,
             fg=TEXT,
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
             padx=9,
         )
         label.pack(side=tk.LEFT)
@@ -926,7 +957,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=8,
             pady=2,
         ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
@@ -937,28 +968,40 @@ class MarketTerminalApp(tk.Tk):
             columns=("asset", "last", "bid", "ask", "change", "volume", "latency"),
             show="headings",
             height=12,
+            style="Watchlist.Treeview",
         )
+        self.watchlist_tree.tag_configure("watchlist_even", background=WATCHLIST_ROW_EVEN)
+        self.watchlist_tree.tag_configure("watchlist_odd", background=WATCHLIST_ROW_ODD)
         self.watchlist_tree.tag_configure("tick_up", foreground=UP)
         self.watchlist_tree.tag_configure("tick_down", foreground=DOWN)
         self.watchlist_tree.tag_configure("tick_flat", foreground=TEXT)
         self.watchlist_tree.tag_configure("tick_error", foreground=DOWN)
-        for column, title, width in (
-            ("asset", "Asset", 125),
-            ("last", "Last", 70),
-            ("bid", "Bid", 70),
-            ("ask", "Ask", 70),
-            ("change", "Chg", 80),
-            ("volume", "Volume", 75),
-            ("latency", "Latency", 65),
-        ):
-            self.watchlist_tree.heading(column, text=title)
-            self.watchlist_tree.column(column, width=width, anchor=tk.W)
+        saved_widths = normalized_watchlist_column_widths(
+            self.saved_layout_state.get("watchlist_columns")
+        )
+        for column, title, default_width in WATCHLIST_COLUMNS:
+            anchor = tk.W if column == "asset" else tk.E
+            self.watchlist_tree.heading(column, text=title, anchor=anchor)
+            self.watchlist_tree.column(
+                column,
+                width=saved_widths.get(column, default_width),
+                minwidth=WATCHLIST_MIN_COLUMN_WIDTH,
+                anchor=anchor,
+            )
         self.watchlist_tree.pack(fill=tk.BOTH, expand=True)
         self.watchlist_tree.bind("<ButtonPress-1>", self._start_watchlist_row_drag, add="+")
         self.watchlist_tree.bind("<B1-Motion>", self._drag_watchlist_row, add="+")
         self.watchlist_tree.bind("<ButtonRelease-1>", self._finish_watchlist_row_drag, add="+")
         self.watchlist_tree.bind("<Double-Button-1>", self._begin_watchlist_asset_search)
         self.watchlist_tree.bind("<<TreeviewSelect>>", self._on_watchlist_selection_changed)
+        self.watchlist_column_separators = [
+            tk.Frame(content, bg=GRID, width=1, cursor="")
+            for _column in self.watchlist_tree["columns"][:-1]
+        ]
+        self.watchlist_tree.bind("<Configure>", self._position_watchlist_column_separators, add="+")
+        self.watchlist_tree.bind("<B1-Motion>", self._position_watchlist_column_separators, add="+")
+        self.watchlist_tree.bind("<ButtonRelease-1>", self._finish_watchlist_column_resize, add="+")
+        self.after_idle(self._position_watchlist_column_separators)
         actions = ttk.Frame(content, style="Panel.TFrame")
         actions.pack(fill=tk.X, pady=(7, 0))
         ttk.Button(actions, text="ADD ROW", command=self._add_watchlist_row).pack(side=tk.LEFT)
@@ -1003,7 +1046,7 @@ class MarketTerminalApp(tk.Tk):
             text="MACRO",
             bg=GRID,
             fg=TEXT,
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
             padx=9,
         )
         label.pack(side=tk.LEFT)
@@ -1028,7 +1071,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=6,
             pady=0,
             highlightthickness=0,
@@ -1044,7 +1087,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=8,
             pady=2,
         ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
@@ -1102,7 +1145,7 @@ class MarketTerminalApp(tk.Tk):
             text="NEWS",
             bg=GRID,
             fg=TEXT,
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
             padx=9,
         )
         label.pack(side=tk.LEFT)
@@ -1121,7 +1164,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=6,
             pady=0,
             highlightthickness=0,
@@ -1137,7 +1180,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 8, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
             padx=8,
             pady=2,
         ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
@@ -1178,14 +1221,17 @@ class MarketTerminalApp(tk.Tk):
         self.news_resize_grip.bind("<ButtonRelease-1>", self._finish_news_window_resize)
 
     def _add_watchlist_row(self, row: dict | None = None) -> None:
-        item = f"wl{len(self.watchlist_tree.get_children()) + 1}"
+        row_index = len(self.watchlist_tree.get_children())
+        item = f"wl{row_index + 1}"
         instrument = instrument_from_watchlist_row(row or {})
         values = (
             (watchlist_asset_label(instrument), "", "", "", "", "", "")
             if instrument
             else ("", "", "", "", "", "", "")
         )
-        self.watchlist_tree.insert("", tk.END, iid=item, values=values)
+        self.watchlist_tree.insert(
+            "", tk.END, iid=item, values=values, tags=watchlist_item_tags(row_index, "tick_flat")
+        )
         if instrument:
             self.watchlist_instruments[item] = instrument
 
@@ -1196,6 +1242,44 @@ class MarketTerminalApp(tk.Tk):
             self.watchlist_quote_inflight.discard(item)
             self.watchlist_tree.delete(item)
         self._save_watchlist_state()
+        self._apply_watchlist_row_stripes()
+
+    def _apply_watchlist_row_stripes(self) -> None:
+        for row_index, item in enumerate(self.watchlist_tree.get_children()):
+            direction = next(
+                (
+                    tag
+                    for tag in self.watchlist_tree.item(item, "tags")
+                    if tag in {"tick_up", "tick_down", "tick_flat", "tick_error"}
+                ),
+                "tick_flat",
+            )
+            values = tuple(self.watchlist_tree.item(item, "values"))
+            self.watchlist_tree.item(
+                item,
+                tags=watchlist_item_tags(
+                    row_index, direction
+                ),
+            )
+
+    def _position_watchlist_column_separators(self, _event: tk.Event | None = None) -> None:
+        if not hasattr(self, "watchlist_column_separators"):
+            return
+        tree = self.watchlist_tree
+        x_offset = tree.winfo_x()
+        y_offset = tree.winfo_y()
+        heading_height = watchlist_heading_height(tree)
+        height = max(tree.winfo_height() - heading_height, 0)
+        boundary = 0
+        for separator, column in zip(self.watchlist_column_separators, tree["columns"][:-1]):
+            boundary += int(tree.column(column, "width"))
+            separator.place(
+                x=x_offset + boundary - 1,
+                y=y_offset + heading_height,
+                width=1,
+                height=height,
+            )
+            separator.lift(tree)
 
     def _start_watchlist_row_drag(self, event: tk.Event) -> None:
         if self.watchlist_editor is not None:
@@ -1209,10 +1293,10 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_drag_start_y = event.y
         self.watchlist_drag_active = False
 
-    def _drag_watchlist_row(self, event: tk.Event) -> str:
+    def _drag_watchlist_row(self, event: tk.Event) -> str | None:
         item = self.watchlist_drag_item
         if not item:
-            return "break"
+            return None
         if abs(event.y - self.watchlist_drag_start_y) < 6 and not self.watchlist_drag_active:
             return "break"
         self.watchlist_drag_active = True
@@ -1227,11 +1311,16 @@ class MarketTerminalApp(tk.Tk):
         was_active = self.watchlist_drag_active
         if self.watchlist_drag_active:
             self._save_watchlist_state()
+            self._apply_watchlist_row_stripes()
             self.status_var.set("Watchlist order saved.")
         self.watchlist_drag_item = None
         self.watchlist_drag_start_y = 0
         self.watchlist_drag_active = False
         return "break" if was_active else None
+
+    def _finish_watchlist_column_resize(self, _event: tk.Event | None = None) -> None:
+        self._position_watchlist_column_separators()
+        self._mark_layout_dirty_if_changed()
 
     def _on_watchlist_selection_changed(self, _event: tk.Event | None = None) -> None:
         selected = self.watchlist_tree.selection()
@@ -1274,7 +1363,7 @@ class MarketTerminalApp(tk.Tk):
             fg=TEXT,
             insertbackground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 10),
+            font=(TERMINAL_FONT_FAMILY, 10),
         )
         self.watchlist_editor.place(x=x, y=y, width=width, height=height)
         self.watchlist_editor.focus_set()
@@ -1326,7 +1415,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground=GRID,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 9, "bold"),
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
             padx=10,
             pady=4,
         ).pack(side=tk.RIGHT, padx=(8, 0))
@@ -1339,7 +1428,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground="#ffc247",
             activeforeground=BG,
             relief=tk.FLAT,
-            font=("Segoe UI", 9),
+            font=(TERMINAL_FONT_FAMILY, 9),
             padx=8,
             pady=4,
         ).pack(side=tk.RIGHT, padx=(8, 0))
@@ -1420,6 +1509,7 @@ class MarketTerminalApp(tk.Tk):
         layout = {
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
+            "watchlist_columns": self._watchlist_column_widths(),
         }
         save_layout_state(self.layout_state_path, layout)
         self.saved_layout_state = layout
@@ -1439,7 +1529,18 @@ class MarketTerminalApp(tk.Tk):
         return {
             "watchlist": window_place_geometry(self.watchlist_window),
             "chart": window_place_geometry(self.chart_window),
+            "watchlist_columns": self._watchlist_column_widths(),
         }
+
+    def _watchlist_column_widths(self) -> dict[str, int]:
+        if not hasattr(self, "watchlist_tree"):
+            return normalized_watchlist_column_widths({})
+        return normalized_watchlist_column_widths(
+            {
+                column: self.watchlist_tree.column(column, "width")
+                for column in self.watchlist_tree["columns"]
+            }
+        )
 
     def _mark_layout_saved_snapshot(self) -> None:
         self.saved_layout_snapshot = self._current_function_layout()
@@ -1569,7 +1670,7 @@ class MarketTerminalApp(tk.Tk):
             fg=TEXT,
             insertbackground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 10),
+            font=(TERMINAL_FONT_FAMILY, 10),
         )
         self.compare_search_entry.pack(fill=tk.X, pady=(7, 3), ipady=5)
         self.compare_search_entry.bind("<Return>", self._accept_or_search)
@@ -2201,7 +2302,7 @@ class MarketTerminalApp(tk.Tk):
             fg=TEXT,
             insertbackground=TEXT,
             relief=tk.FLAT,
-            font=("Segoe UI", 9),
+            font=(TERMINAL_FONT_FAMILY, 9),
         )
 
     def _build_technical_flyout(self, panel) -> None:
@@ -2466,6 +2567,7 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_tree.item(
             item,
             values=(watchlist_asset_label(instrument), "Loading", "", "", "", "", ""),
+            tags=watchlist_item_tags(self.watchlist_tree.index(item), "tick_flat"),
         )
         self.search_action_var.set("OPEN SECURITY")
         self.watchlist_search_var.set("")
@@ -2727,31 +2829,34 @@ class MarketTerminalApp(tk.Tk):
     def _update_watchlist_quote(self, item: str, instrument: Instrument, quote, latency_ms: float) -> None:
         self.watchlist_quote_inflight.discard(item)
         direction_tag = self._watchlist_tick_tag(item, quote)
+        values = (
+            watchlist_asset_label(instrument),
+            format_quote_value(quote.last),
+            format_bid_ask_value(quote.bid, quote, "bid"),
+            format_bid_ask_value(quote.ask, quote, "ask"),
+            format_quote_change(quote.change, quote.change_percent),
+            format_volume_value(quote.volume) if quote.volume is not None else "",
+            format_latency_value(latency_ms),
+        )
         self.watchlist_tree.item(
             item,
-            values=(
-                watchlist_asset_label(instrument),
-                format_quote_value(quote.last),
-                format_bid_ask_value(quote.bid, quote, "bid"),
-                format_bid_ask_value(quote.ask, quote, "ask"),
-                format_quote_change(quote.change, quote.change_percent),
-                format_volume_value(quote.volume) if quote.volume is not None else "",
-                format_latency_value(latency_ms),
+            values=values,
+            tags=watchlist_item_tags(
+                self.watchlist_tree.index(item),
+                direction_tag,
             ),
-            tags=(direction_tag,),
         )
 
     def _watchlist_tick_tag(self, item: str, quote) -> str:
         current = (quote.last, quote.bid, quote.ask)
         previous = self.watchlist_last_quotes.get(item)
         self.watchlist_last_quotes[item] = current
-        if previous is None:
-            return "tick_flat"
-        for old, new in zip(previous, current):
-            if old is None or new is None or old == new:
-                continue
-            return "tick_up" if new > old else "tick_down"
-        return "tick_flat"
+        if previous is not None:
+            for old, new in zip(previous, current):
+                if old is None or new is None or old == new:
+                    continue
+                return "tick_up" if new > old else "tick_down"
+        return quote_change_tag(quote.change, quote.change_percent)
 
     def _update_watchlist_quote_error(
         self, item: str, instrument: Instrument, exc: Exception
@@ -2770,7 +2875,7 @@ class MarketTerminalApp(tk.Tk):
                 "",
                 str(exc).strip()[:18] or exc.__class__.__name__,
             ),
-            tags=("tick_error",),
+            tags=watchlist_item_tags(self.watchlist_tree.index(item), "tick_error"),
         )
 
     def _open_search_result(self) -> None:
@@ -2991,10 +3096,14 @@ class MarketTerminalApp(tk.Tk):
         plot_frames = displayed_close_series(visible_frames, self.display_mode_var.get())
         for position, instrument in enumerate(instruments):
             closes = plot_frames[instrument.symbol]
+            color = price_move_color(
+                visible_frames[instrument.symbol],
+                SERIES_COLORS[position % len(SERIES_COLORS)],
+            )
             self.price_axis.plot(
                 closes.index,
                 closes,
-                color=SERIES_COLORS[position % len(SERIES_COLORS)],
+                color=color,
                 linewidth=1.5,
                 label=instrument.symbol,
             )
@@ -3351,15 +3460,20 @@ class MarketTerminalApp(tk.Tk):
         timestamp, values = nearest_displayed_values(displayed, event.xdata)
         self._draw_hover(timestamp, values)
 
+    def _series_display_color(self, symbol: str, position: int) -> str:
+        fallback = SERIES_COLORS[position % len(SERIES_COLORS)]
+        frame = self.current_frames.get(symbol)
+        return price_move_color(frame, fallback)
+
     def _draw_hover(self, timestamp: pd.Timestamp, values: list[tuple[str, float]]) -> None:
         self._clear_hover()
         guide = self.price_axis.axvline(timestamp, color=MUTED, linewidth=0.8, linestyle="--")
         self.hover_artists.append(guide)
-        for position, (_symbol, value) in enumerate(values):
+        for position, (symbol, value) in enumerate(values):
             marker = self.price_axis.scatter(
                 [timestamp],
                 [value],
-                color=SERIES_COLORS[position % len(SERIES_COLORS)],
+                color=self._series_display_color(symbol, position),
                 s=34,
                 edgecolors=BG,
                 zorder=7,
@@ -4117,17 +4231,13 @@ def instrument_fundamentals_text(instrument: Instrument) -> str:
 
 
 def watchlist_asset_label(instrument: Instrument) -> str:
-    return f"{instrument.symbol}  {instrument.name}".strip()
+    return instrument.symbol
 
 
 def format_quote_value(value: float | None) -> str:
     if value is None:
         return ""
-    if abs(value) >= 1_000:
-        return f"{value:,.2f}"
-    if abs(value) >= 10:
-        return f"{value:,.3f}"
-    return f"{value:,.4f}"
+    return f"{value:,.2f}"
 
 
 def format_bid_ask_value(value: float | None, quote, side: str) -> str:
@@ -4148,6 +4258,64 @@ def format_quote_change(change: float | None, change_percent: float | None = Non
     if change_percent is not None:
         return f"{change_percent:+.2f}%"
     return ""
+
+
+def quote_change_tag(change: float | None, change_percent: float | None = None) -> str:
+    move = change if change is not None else change_percent
+    if move is None:
+        return "tick_flat"
+    if move > 0:
+        return "tick_up"
+    if move < 0:
+        return "tick_down"
+    return "tick_flat"
+
+
+def watchlist_row_stripe(row_index: int) -> str:
+    return "watchlist_even" if row_index % 2 == 0 else "watchlist_odd"
+
+
+def watchlist_item_tags(row_index: int, direction_tag: str) -> tuple[str, str]:
+    return watchlist_row_stripe(row_index), direction_tag
+
+
+def normalized_watchlist_column_widths(widths: object) -> dict[str, int]:
+    defaults = {column: width for column, _title, width in WATCHLIST_COLUMNS}
+    if not isinstance(widths, dict):
+        return defaults
+    normalized = defaults.copy()
+    for column in defaults:
+        try:
+            width = int(widths[column])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if width >= WATCHLIST_MIN_COLUMN_WIDTH:
+            normalized[column] = width
+    return normalized
+
+
+def watchlist_heading_height(tree, fallback: int = 25) -> int:
+    items = tree.get_children()
+    if not items:
+        return fallback
+    first_row_box = tree.bbox(items[0])
+    if not first_row_box:
+        return fallback
+    return int(first_row_box[1])
+
+
+def price_move_color(frame: pd.DataFrame | None, fallback: str) -> str:
+    if frame is None or "Close" not in frame:
+        return fallback
+    closes = pd.to_numeric(frame["Close"], errors="coerce").dropna()
+    if len(closes) < 2:
+        return fallback
+    change = float(closes.iloc[-1] - closes.iloc[-2])
+    if change > 0:
+        return UP
+    if change < 0:
+        return DOWN
+    return fallback
 
 
 def format_signed_value(value: float | None) -> str:

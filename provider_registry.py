@@ -48,6 +48,15 @@ IMPLEMENTED_PROVIDER_SPECS = (
         notes="Primary best-effort market data provider; data can be delayed or incomplete.",
     ),
     ProviderSpec(
+        provider_id="binance",
+        name="Binance Spot public API",
+        features=("crypto_history", "crypto_quotes"),
+        asset_classes=("crypto",),
+        docs_url="https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md",
+        implemented=True,
+        notes="Preferred source for Binance-listed spot crypto pairs; no key for public market data, but access can be geographically restricted.",
+    ),
+    ProviderSpec(
         provider_id="openfigi",
         name="OpenFIGI",
         features=("identifier_mapping", "symbology"),
@@ -154,6 +163,10 @@ def _provider_health(spec: ProviderSpec) -> ProviderHealth:
         return ProviderHealth(spec, STATUS_PLANNED, "Listed in DATA_ROADMAP.md; not implemented yet.")
     if spec.provider_id == "yahoo":
         return ProviderHealth(spec, STATUS_READY, "No project API key required.")
+    if spec.provider_id == "binance":
+        if os.getenv("BINANCE_DISABLE", "0") == "1":
+            return ProviderHealth(spec, STATUS_LIMITED, "Disabled by BINANCE_DISABLE=1.")
+        return ProviderHealth(spec, STATUS_READY, "No project API key required for public spot market data.")
     if spec.provider_id == "openfigi":
         if _has_env_value(spec.credential_env):
             return ProviderHealth(spec, STATUS_READY, f"{spec.credential_env} is configured.")
