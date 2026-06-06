@@ -60,6 +60,7 @@ DOWN = "#ef5350"
 WATCHLIST_ROW_EVEN = "#10161c"
 WATCHLIST_ROW_ODD = "#1b242c"
 TERMINAL_FONT_FAMILY = "Cascadia Mono"
+MAXIMIZE_ICON = "\u25a1"
 WATCHLIST_COLUMNS = (
     ("asset", "Asset", 125),
     ("last", "Last", 70),
@@ -195,6 +196,8 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_drag_item: str | None = None
         self.watchlist_drag_start_y = 0
         self.watchlist_drag_active = False
+        self.watchlist_next_row_id = 1
+        self.watchlist_context_item: str | None = None
         self.add_to_compare_mode = False
         self.suggestion_anchor = None
         self.selected_instrument: Instrument | None = None
@@ -219,6 +222,7 @@ class MarketTerminalApp(tk.Tk):
         self.text_selection_borders: list[tk.Toplevel] = []
         self.floating_window_drag: dict[str, int] | None = None
         self.floating_window_resize: dict[str, int] | None = None
+        self.floating_window_restore_geometries: dict[tk.Widget, dict[str, int]] = {}
         self.layout_save_after_id: str | None = None
         self.layout_manually_saved = False
         self.saved_layout_snapshot: dict = {}
@@ -458,15 +462,15 @@ class MarketTerminalApp(tk.Tk):
         self.search_entry.bind("<FocusIn>", lambda _event: self._set_suggestion_anchor(self.search_entry))
         tk.Button(
             self.chart_titlebar,
-            text="MAX",
+            text=MAXIMIZE_ICON,
             command=self._maximize_chart_window,
             bg=GRID,
             fg=MUTED,
             activebackground=PANEL,
             activeforeground=TEXT,
             relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
-            padx=8,
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
+            padx=6,
             pady=2,
         ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
         self.chart_titlebar.bind("<ButtonPress-1>", self._start_chart_window_drag)
@@ -476,7 +480,7 @@ class MarketTerminalApp(tk.Tk):
         self.chart_panel.pack(fill=tk.BOTH, expand=True)
         self.chart_resize_grip = tk.Frame(
             self.chart_window,
-            bg=ORANGE,
+            bg=PANEL,
             width=15,
             height=15,
             cursor="size_nw_se",
@@ -615,10 +619,37 @@ class MarketTerminalApp(tk.Tk):
         self.status_var.set(f"Watchlist linked to group {self.watchlist_group_var.get()}.")
 
     def _maximize_chart_window(self) -> None:
+        self._maximize_floating_window(self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT)
+
+    def _maximize_watchlist_window(self) -> None:
+        self._maximize_floating_window(self.watchlist_window, 360, 260)
+
+    def _maximize_macro_window(self) -> None:
+        self._maximize_floating_window(self.macro_window, MIN_MACRO_WINDOW_WIDTH, MIN_MACRO_WINDOW_HEIGHT)
+
+    def _maximize_news_window(self) -> None:
+        self._maximize_floating_window(self.news_window, MIN_NEWS_WINDOW_WIDTH, MIN_NEWS_WINDOW_HEIGHT)
+
+    def _maximize_floating_window(
+        self, window: tk.Widget, minimum_width: int, minimum_height: int
+    ) -> None:
         self.desktop.update_idletasks()
-        width = max(self.desktop.winfo_width(), MIN_CHART_WINDOW_WIDTH)
-        height = max(self.desktop.winfo_height(), MIN_CHART_WINDOW_HEIGHT)
-        self.chart_window.place_configure(x=0, y=0, width=width, height=height)
+        restore_geometry = self.floating_window_restore_geometries.pop(window, None)
+        if restore_geometry is not None:
+            window.lift()
+            window.place_configure(**restore_geometry)
+            self._mark_layout_dirty_if_changed()
+            return
+        self.floating_window_restore_geometries[window] = {
+            "x": window.winfo_x(),
+            "y": window.winfo_y(),
+            "width": window.winfo_width(),
+            "height": window.winfo_height(),
+        }
+        width = max(self.desktop.winfo_width(), minimum_width)
+        height = max(self.desktop.winfo_height(), minimum_height)
+        window.lift()
+        window.place_configure(x=0, y=0, width=width, height=height)
         self._mark_layout_dirty_if_changed()
 
     def _start_chart_window_drag(self, event: tk.Event) -> str:
@@ -950,7 +981,20 @@ class MarketTerminalApp(tk.Tk):
         )
         tk.Button(
             self.watchlist_titlebar,
-            text="REFRESH",
+            text=MAXIMIZE_ICON,
+            command=self._maximize_watchlist_window,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
+            padx=6,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        tk.Button(
+            self.watchlist_titlebar,
+            text="R",
             command=self.refresh_watchlist,
             bg=GRID,
             fg=MUTED,
@@ -993,6 +1037,7 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_tree.bind("<B1-Motion>", self._drag_watchlist_row, add="+")
         self.watchlist_tree.bind("<ButtonRelease-1>", self._finish_watchlist_row_drag, add="+")
         self.watchlist_tree.bind("<Double-Button-1>", self._begin_watchlist_asset_search)
+        self.watchlist_tree.bind("<Button-3>", self._show_watchlist_context_menu)
         self.watchlist_tree.bind("<<TreeviewSelect>>", self._on_watchlist_selection_changed)
         self.watchlist_column_separators = [
             tk.Frame(content, bg=GRID, width=1, cursor="")
@@ -1002,20 +1047,23 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_tree.bind("<B1-Motion>", self._position_watchlist_column_separators, add="+")
         self.watchlist_tree.bind("<ButtonRelease-1>", self._finish_watchlist_column_resize, add="+")
         self.after_idle(self._position_watchlist_column_separators)
-        actions = ttk.Frame(content, style="Panel.TFrame")
-        actions.pack(fill=tk.X, pady=(7, 0))
-        ttk.Button(actions, text="ADD ROW", command=self._add_watchlist_row).pack(side=tk.LEFT)
-        ttk.Button(actions, text="REMOVE", command=self._remove_watchlist_row).pack(
-            side=tk.LEFT, padx=(5, 0)
-        )
         ttk.Label(
             content,
-            text="Double-click Asset to search and fill row.",
+            text="Double-click Asset to search. Right-click rows to insert or remove.",
             style="Status.TLabel",
-        ).pack(anchor=tk.W, pady=(6, 0))
+        ).pack(anchor=tk.W, pady=(7, 0))
+        self.watchlist_context_menu = tk.Menu(
+            self.watchlist_tree,
+            tearoff=False,
+            bg=PANEL,
+            fg=TEXT,
+            activebackground=ORANGE,
+            activeforeground=BG,
+            relief=tk.FLAT,
+        )
         self.watchlist_resize_grip = tk.Frame(
             self.watchlist_window,
-            bg=ORANGE,
+            bg=PANEL,
             width=15,
             height=15,
             cursor="size_nw_se",
@@ -1028,6 +1076,7 @@ class MarketTerminalApp(tk.Tk):
             self._add_watchlist_row(row)
         for _position in range(max(8 - len(self.saved_watchlist_state), 0)):
             self._add_watchlist_row()
+        self._ensure_watchlist_trailing_empty_row()
 
     def _build_macro_window(self) -> None:
         self.macro_window = tk.Frame(
@@ -1054,6 +1103,19 @@ class MarketTerminalApp(tk.Tk):
             widget.bind("<ButtonPress-1>", self._start_macro_window_drag)
             widget.bind("<B1-Motion>", self._drag_macro_window)
             widget.bind("<ButtonRelease-1>", self._finish_macro_window_drag)
+        tk.Button(
+            self.macro_titlebar,
+            text=MAXIMIZE_ICON,
+            command=self._maximize_macro_window,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
+            padx=6,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
         category_menu = tk.OptionMenu(
             self.macro_titlebar,
             self.macro_category_var,
@@ -1117,7 +1179,7 @@ class MarketTerminalApp(tk.Tk):
         ).pack(fill=tk.X)
         self.macro_resize_grip = tk.Frame(
             self.macro_window,
-            bg=ORANGE,
+            bg=PANEL,
             width=15,
             height=15,
             cursor="size_nw_se",
@@ -1153,6 +1215,19 @@ class MarketTerminalApp(tk.Tk):
             widget.bind("<ButtonPress-1>", self._start_news_window_drag)
             widget.bind("<B1-Motion>", self._drag_news_window)
             widget.bind("<ButtonRelease-1>", self._finish_news_window_drag)
+        tk.Button(
+            self.news_titlebar,
+            text=MAXIMIZE_ICON,
+            command=self._maximize_news_window,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
+            padx=6,
+            pady=2,
+        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
         topic_menu = tk.OptionMenu(
             self.news_titlebar,
             self.news_topic_var,
@@ -1210,7 +1285,7 @@ class MarketTerminalApp(tk.Tk):
         ).pack(fill=tk.X)
         self.news_resize_grip = tk.Frame(
             self.news_window,
-            bg=ORANGE,
+            bg=PANEL,
             width=15,
             height=15,
             cursor="size_nw_se",
@@ -1220,29 +1295,94 @@ class MarketTerminalApp(tk.Tk):
         self.news_resize_grip.bind("<B1-Motion>", self._resize_news_window)
         self.news_resize_grip.bind("<ButtonRelease-1>", self._finish_news_window_resize)
 
-    def _add_watchlist_row(self, row: dict | None = None) -> None:
-        row_index = len(self.watchlist_tree.get_children())
-        item = f"wl{row_index + 1}"
+    def _add_watchlist_row(self, row: dict | None = None, index: int | str = tk.END) -> str:
+        item = self._next_watchlist_item_id()
         instrument = instrument_from_watchlist_row(row or {})
         values = (
             (watchlist_asset_label(instrument), "", "", "", "", "", "")
             if instrument
             else ("", "", "", "", "", "", "")
         )
+        row_index = (
+            len(self.watchlist_tree.get_children())
+            if index == tk.END
+            else int(index)
+        )
         self.watchlist_tree.insert(
-            "", tk.END, iid=item, values=values, tags=watchlist_item_tags(row_index, "tick_flat")
+            "", index, iid=item, values=values, tags=watchlist_item_tags(row_index, "tick_flat")
         )
         if instrument:
             self.watchlist_instruments[item] = instrument
+        self._apply_watchlist_row_stripes()
+        return item
 
-    def _remove_watchlist_row(self) -> None:
-        for item in self.watchlist_tree.selection():
+    def _next_watchlist_item_id(self) -> str:
+        while True:
+            item = f"wl{self.watchlist_next_row_id}"
+            self.watchlist_next_row_id += 1
+            if not self.watchlist_tree.exists(item):
+                return item
+
+    def _remove_watchlist_row(self, item: str | None = None) -> None:
+        items = (item,) if item else self.watchlist_tree.selection()
+        for item in items:
+            if not self.watchlist_tree.exists(item):
+                continue
             self.watchlist_instruments.pop(item, None)
             self.watchlist_last_quotes.pop(item, None)
             self.watchlist_quote_inflight.discard(item)
             self.watchlist_tree.delete(item)
+        if not self.watchlist_tree.get_children():
+            self._add_watchlist_row()
         self._save_watchlist_state()
         self._apply_watchlist_row_stripes()
+
+    def _show_watchlist_context_menu(self, event: tk.Event) -> str:
+        self._destroy_watchlist_editor()
+        item = self.watchlist_tree.identify_row(event.y)
+        self.watchlist_context_item = item or None
+        if item:
+            self.watchlist_tree.selection_set(item)
+        self.watchlist_context_menu.delete(0, tk.END)
+        if item and item in self.watchlist_instruments:
+            self.watchlist_context_menu.add_command(
+                label="Insert Row Above",
+                command=lambda item=item: self._insert_watchlist_row_near(item, before=True),
+            )
+            self.watchlist_context_menu.add_command(
+                label="Insert Row Below",
+                command=lambda item=item: self._insert_watchlist_row_near(item, before=False),
+            )
+            self.watchlist_context_menu.add_separator()
+        else:
+            self.watchlist_context_menu.add_command(
+                label="Add Row At Bottom",
+                command=self._append_watchlist_row_from_menu,
+            )
+        if item:
+            self.watchlist_context_menu.add_command(
+                label="Remove Row",
+                command=lambda item=item: self._remove_watchlist_row(item),
+            )
+        self.watchlist_context_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _append_watchlist_row_from_menu(self) -> None:
+        self._add_watchlist_row()
+        self._save_watchlist_state()
+
+    def _insert_watchlist_row_near(self, item: str, before: bool) -> None:
+        if not self.watchlist_tree.exists(item):
+            return
+        target_index = self.watchlist_tree.index(item)
+        insert_index = target_index if before else target_index + 1
+        self._add_watchlist_row(index=insert_index)
+        self._save_watchlist_state()
+
+    def _ensure_watchlist_trailing_empty_row(self) -> None:
+        children = self.watchlist_tree.get_children()
+        if not children or children[-1] in self.watchlist_instruments:
+            self._add_watchlist_row()
 
     def _apply_watchlist_row_stripes(self) -> None:
         for row_index, item in enumerate(self.watchlist_tree.get_children()):
@@ -2571,6 +2711,7 @@ class MarketTerminalApp(tk.Tk):
         )
         self.search_action_var.set("OPEN SECURITY")
         self.watchlist_search_var.set("")
+        self._ensure_watchlist_trailing_empty_row()
         self._save_watchlist_state()
         self._refresh_watchlist_item(item, instrument)
 
