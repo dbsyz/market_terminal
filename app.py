@@ -22,6 +22,7 @@ import pandas as pd
 from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
 from .models import (
@@ -61,6 +62,13 @@ WATCHLIST_ROW_EVEN = "#10161c"
 WATCHLIST_ROW_ODD = "#1b242c"
 TERMINAL_FONT_FAMILY = "Cascadia Mono"
 MAXIMIZE_ICON = "\u25a1"
+TITLEBAR_HEIGHT = 28
+TITLEBAR_TITLE_FONT = (TERMINAL_FONT_FAMILY, 9, "bold")
+TITLEBAR_BUTTON_FONT = (TERMINAL_FONT_FAMILY, 8, "bold")
+TITLEBAR_BUTTON_WIDTH = 3
+TITLEBAR_MENU_WIDTH = 8
+TITLEBAR_BUTTON_PADX = 4
+TITLEBAR_BUTTON_PADY = 1
 WATCHLIST_COLUMNS = (
     ("asset", "Asset", 125),
     ("last", "Last", 70),
@@ -106,6 +114,9 @@ MIN_NEWS_WINDOW_HEIGHT = 360
 SHOW_MACRO_WINDOW = False
 SHOW_NEWS_WINDOW = False
 WATCHLIST_REFRESH_INTERVAL_MS = 5000
+WATCHLIST_TICK_FLASH_MS = 900
+CHART_TOP_OVERLAY_Y = 6
+CHART_HEADER_LINE_GAP = 21
 
 
 @dataclass(frozen=True)
@@ -153,7 +164,8 @@ class MarketTerminalApp(tk.Tk):
         self.status_var = tk.StringVar(
             value="Public/delayed market data via Yahoo Finance | Identifier mapping via OpenFIGI"
         )
-        self.quote_var = tk.StringVar(value="Search for an asset to begin.")
+        self.quote_var = tk.StringVar(value="")
+        self.chart_header_summary_var = tk.StringVar(value="")
         self.fundamentals_var = tk.StringVar(value="")
         self.sec_context_var = tk.StringVar(value="")
         self.identity_var = tk.StringVar(value="")
@@ -162,6 +174,7 @@ class MarketTerminalApp(tk.Tk):
         self.hours_var = tk.StringVar(value="")
         self.extended_hours_var = tk.BooleanVar(value=False)
         self.display_mode_var = tk.StringVar(value="Prices")
+        self.price_render_mode = "line"
         self.compare_visible_var = tk.BooleanVar(value=False)
         self.rebase_comparison_var = tk.BooleanVar(value=False)
         self.betas_comparison_var = tk.BooleanVar(value=False)
@@ -193,6 +206,7 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_quote_inflight: set[str] = set()
         self.watchlist_refresh_after_id: str | None = None
         self.watchlist_last_quotes: dict[str, tuple[float | None, float | None, float | None]] = {}
+        self.watchlist_tick_reset_after_ids: dict[str, str] = {}
         self.watchlist_drag_item: str | None = None
         self.watchlist_drag_start_y = 0
         self.watchlist_drag_active = False
@@ -283,6 +297,18 @@ class MarketTerminalApp(tk.Tk):
             "Quote.TLabel", background=BG, foreground=TEXT, font=(TERMINAL_FONT_FAMILY, 12, "bold")
         )
         style.configure(
+            "ChartOverlay.TLabel",
+            background=BG,
+            foreground=TEXT,
+            font=(TERMINAL_FONT_FAMILY, 9),
+        )
+        style.configure(
+            "ChartOverlayQuote.TLabel",
+            background=BG,
+            foreground=TEXT,
+            font=(TERMINAL_FONT_FAMILY, 11, "bold"),
+        )
+        style.configure(
             "TButton",
             background=PANEL,
             foreground=TEXT,
@@ -307,6 +333,24 @@ class MarketTerminalApp(tk.Tk):
             font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         style.map("Chip.TButton", background=[("active", GRID)], foreground=[("active", TEXT)])
+        style.configure(
+            "Header.TButton",
+            background=GRID,
+            foreground=MUTED,
+            bordercolor=GRID,
+            padding=(4, 1),
+            font=TITLEBAR_BUTTON_FONT,
+        )
+        style.map("Header.TButton", background=[("active", PANEL)], foreground=[("active", TEXT)])
+        style.configure(
+            "Selected.Header.TButton",
+            background=ORANGE,
+            foreground=BG,
+            bordercolor=ORANGE,
+            padding=(4, 1),
+            font=TITLEBAR_BUTTON_FONT,
+        )
+        style.map("Selected.Header.TButton", background=[("active", "#ffc247")])
         style.configure(
             "Selected.Chip.TButton",
             background=ORANGE,
@@ -362,6 +406,20 @@ class MarketTerminalApp(tk.Tk):
         style.map("Treeview", background=[("selected", ORANGE)], foreground=[("selected", BG)])
         style.configure("TCheckbutton", background=BG, foreground=MUTED)
         style.configure(
+            "Header.TCheckbutton",
+            background=GRID,
+            foreground=MUTED,
+            indicatorcolor=GRID,
+            padding=(4, 1),
+            font=TITLEBAR_BUTTON_FONT,
+        )
+        style.map(
+            "Header.TCheckbutton",
+            background=[("active", PANEL)],
+            foreground=[("selected", TEXT), ("active", TEXT)],
+            indicatorcolor=[("selected", ORANGE)],
+        )
+        style.configure(
             "Chip.TCheckbutton",
             background=PANEL,
             foreground=MUTED,
@@ -391,12 +449,6 @@ class MarketTerminalApp(tk.Tk):
     def _build_controls(self) -> None:
         header = ttk.Frame(self, padding=(18, 13, 18, 8))
         header.pack(fill=tk.X)
-        ttk.Button(
-            header,
-            text="SAVE LAYOUT",
-            style="Chip.TButton",
-            command=self._manual_save_function_layout,
-        ).pack(side=tk.RIGHT, pady=(2, 0))
         for variable in reversed(
             (
                 self.local_time_var,
@@ -422,26 +474,13 @@ class MarketTerminalApp(tk.Tk):
             highlightthickness=1,
         )
         self.chart_window.place(x=0, y=0, width=960, height=560)
-        self.chart_titlebar = tk.Frame(self.chart_window, bg=GRID, height=28, cursor="fleur")
+        self.chart_titlebar = tk.Frame(self.chart_window, bg=GRID, height=TITLEBAR_HEIGHT, cursor="fleur")
         self.chart_titlebar.pack(fill=tk.X)
         self.chart_titlebar.pack_propagate(False)
-        title_label = tk.Label(
-            self.chart_titlebar,
-            text="CHART",
-            bg=GRID,
-            fg=TEXT,
-            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
-            padx=9,
-        )
-        title_label.pack(side=tk.LEFT)
+        title_label = self._build_titlebar_label(self.chart_titlebar, "CHART")
         title_label.bind("<ButtonPress-1>", self._start_chart_window_drag)
         title_label.bind("<B1-Motion>", self._drag_chart_window)
         title_label.bind("<ButtonRelease-1>", self._finish_chart_window_drag)
-        self._build_group_selector(
-            self.chart_titlebar,
-            self.chart_group_var,
-            self._on_chart_group_changed,
-        )
         self.search_entry = tk.Entry(
             self.chart_titlebar,
             textvariable=self.search_var,
@@ -460,24 +499,25 @@ class MarketTerminalApp(tk.Tk):
         self.search_entry.bind("<Down>", lambda _event: self._move_suggestion_selection(1))
         self.search_entry.bind("<Up>", lambda _event: self._move_suggestion_selection(-1))
         self.search_entry.bind("<FocusIn>", lambda _event: self._set_suggestion_anchor(self.search_entry))
-        tk.Button(
+        self.chart_header_summary_label = tk.Label(
             self.chart_titlebar,
-            text=MAXIMIZE_ICON,
-            command=self._maximize_chart_window,
+            textvariable=self.chart_header_summary_var,
             bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
+            fg=TEXT,
+            font=TITLEBAR_BUTTON_FONT,
+            anchor=tk.W,
             padx=6,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        )
+        self.chart_header_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=3)
+        self.chart_header_summary_label.bind("<Enter>", self._show_portfolio_quote_popup)
+        self.chart_header_summary_label.bind("<Leave>", self._hide_portfolio_quote_popup)
+        self._build_titlebar_button(self.chart_titlebar, MAXIMIZE_ICON, self._maximize_chart_window)
         self.chart_titlebar.bind("<ButtonPress-1>", self._start_chart_window_drag)
         self.chart_titlebar.bind("<B1-Motion>", self._drag_chart_window)
         self.chart_titlebar.bind("<ButtonRelease-1>", self._finish_chart_window_drag)
         self.chart_panel = ttk.Frame(self.chart_window, style="Panel.TFrame", padding=(8, 7, 8, 0))
         self.chart_panel.pack(fill=tk.BOTH, expand=True)
+        self._build_chart_toolbar()
         self.chart_resize_grip = tk.Frame(
             self.chart_window,
             bg=PANEL,
@@ -489,27 +529,36 @@ class MarketTerminalApp(tk.Tk):
         self.chart_resize_grip.bind("<ButtonPress-1>", self._start_chart_window_resize)
         self.chart_resize_grip.bind("<B1-Motion>", self._resize_chart_window)
         self.chart_resize_grip.bind("<ButtonRelease-1>", self._finish_chart_window_resize)
-        ttk.Label(self.chart_panel, textvariable=self.identity_var, style="Status.TLabel").pack(
+        self.identity_label = ttk.Label(
+            self.chart_panel, textvariable=self.identity_var, style="ChartOverlay.TLabel"
+        )
+        self.identity_label.pack(
             anchor=tk.W, pady=(0, 3)
         )
         self.quote_label = ttk.Label(
-            self.chart_panel, textvariable=self.quote_var, style="Quote.TLabel", cursor="hand2"
+            self.chart_panel, textvariable=self.quote_var, style="ChartOverlayQuote.TLabel", cursor="hand2"
         )
         self.quote_label.pack(anchor=tk.W, pady=(0, 6))
         self.quote_label.bind("<Enter>", self._show_portfolio_quote_popup)
         self.quote_label.bind("<Leave>", self._hide_portfolio_quote_popup)
-        ttk.Label(self.chart_panel, textvariable=self.fundamentals_var, style="Status.TLabel").pack(
+        self.fundamentals_label = ttk.Label(
+            self.chart_panel, textvariable=self.fundamentals_var, style="ChartOverlay.TLabel"
+        )
+        self.fundamentals_label.pack(
             anchor=tk.W, pady=(0, 4)
         )
-        ttk.Label(
+        self.sec_context_label = ttk.Label(
             self.chart_panel,
             textvariable=self.sec_context_var,
-            style="Status.TLabel",
+            style="ChartOverlay.TLabel",
             wraplength=1200,
-        ).pack(anchor=tk.W, pady=(0, 4))
-        ttk.Label(self.chart_panel, textvariable=self.measurement_var, style="Status.TLabel").pack(
-            anchor=tk.W, pady=(0, 4)
         )
+        self.sec_context_label.pack(anchor=tk.W, pady=(0, 4))
+        self.measurement_label = ttk.Label(
+            self.chart_panel, textvariable=self.measurement_var, style="ChartOverlay.TLabel"
+        )
+        self.measurement_label.pack(anchor=tk.W, pady=(0, 4))
+        self._hide_chart_metadata_labels()
         self._build_suggestion_popup()
         self._build_watchlist_window()
         self._build_macro_window()
@@ -548,9 +597,16 @@ class MarketTerminalApp(tk.Tk):
         for name, widget, minimum_width, minimum_height in (
             ("watchlist", self.watchlist_window, 360, 260),
             ("chart", self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT),
+            ("macro", self.macro_window, MIN_MACRO_WINDOW_WIDTH, MIN_MACRO_WINDOW_HEIGHT),
+            ("news", self.news_window, MIN_NEWS_WINDOW_WIDTH, MIN_NEWS_WINDOW_HEIGHT),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
+                continue
+            visible = bool(geometry.get("visible", name in {"watchlist", "chart"}))
+            if not visible and name not in {"watchlist", "chart"}:
+                widget.place_forget()
+                restored = True
                 continue
             x = int(geometry.get("x", 0))
             y = int(geometry.get("y", 0))
@@ -560,10 +616,10 @@ class MarketTerminalApp(tk.Tk):
             restored = True
         self._constrain_chart_window_to_desktop(None)
         self._constrain_watchlist_window_to_desktop()
-        if SHOW_NEWS_WINDOW:
+        if self.macro_window.winfo_manager() == "place":
+            self._constrain_macro_window_to_desktop()
+        if self.news_window.winfo_manager() == "place":
             self._constrain_news_window_to_desktop()
-        self._hide_macro_window()
-        self._hide_news_window()
         self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
 
@@ -571,9 +627,15 @@ class MarketTerminalApp(tk.Tk):
         for name, widget in (
             ("watchlist", self.watchlist_window),
             ("chart", self.chart_window),
+            ("macro", self.macro_window),
+            ("news", self.news_window),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
+                continue
+            visible = bool(geometry.get("visible", name in {"watchlist", "chart"}))
+            if not visible and name not in {"watchlist", "chart"}:
+                widget.place_forget()
                 continue
             widget.place_configure(
                 x=int(geometry.get("x", widget.winfo_x())),
@@ -581,8 +643,6 @@ class MarketTerminalApp(tk.Tk):
                 width=int(geometry.get("width", widget.winfo_width())),
                 height=int(geometry.get("height", widget.winfo_height())),
             )
-        self._hide_macro_window()
-        self._hide_news_window()
 
     def _hide_macro_window(self) -> None:
         if hasattr(self, "macro_window") and not SHOW_MACRO_WINDOW:
@@ -591,6 +651,53 @@ class MarketTerminalApp(tk.Tk):
     def _hide_news_window(self) -> None:
         if hasattr(self, "news_window") and not SHOW_NEWS_WINDOW:
             self.news_window.place_forget()
+
+    def _build_titlebar_label(self, parent: tk.Widget, text: str) -> tk.Label:
+        label = tk.Label(
+            parent,
+            text=text,
+            bg=GRID,
+            fg=TEXT,
+            font=TITLEBAR_TITLE_FONT,
+            padx=8,
+        )
+        label.pack(side=tk.LEFT)
+        return label
+
+    def _build_titlebar_button(
+        self, parent: tk.Widget, text: str, command, width: int = TITLEBAR_BUTTON_WIDTH
+    ) -> tk.Button:
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=TITLEBAR_BUTTON_FONT,
+            padx=TITLEBAR_BUTTON_PADX,
+            pady=TITLEBAR_BUTTON_PADY,
+        )
+        button.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        return button
+
+    def _configure_titlebar_menu(self, menu: tk.OptionMenu, width: int = TITLEBAR_MENU_WIDTH) -> None:
+        menu.configure(
+            bg=GRID,
+            fg=MUTED,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=TITLEBAR_BUTTON_FONT,
+            padx=2,
+            pady=0,
+            width=width,
+            highlightthickness=0,
+        )
+        menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
 
     def _build_group_selector(
         self, parent: tk.Widget, variable: tk.StringVar, command
@@ -602,7 +709,7 @@ class MarketTerminalApp(tk.Tk):
             activebackground="#ffc247",
             activeforeground=BG,
             relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
+            font=TITLEBAR_BUTTON_FONT,
             padx=2,
             pady=0,
             width=1,
@@ -743,9 +850,6 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _constrain_macro_window_to_desktop(self) -> None:
-        if not SHOW_MACRO_WINDOW:
-            self._hide_macro_window()
-            return
         if self.desktop.winfo_width() < MIN_MACRO_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_MACRO_WINDOW_HEIGHT:
             return
         desktop_width = max(self.desktop.winfo_width(), MIN_MACRO_WINDOW_WIDTH)
@@ -757,9 +861,6 @@ class MarketTerminalApp(tk.Tk):
         self.macro_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _constrain_news_window_to_desktop(self) -> None:
-        if not SHOW_NEWS_WINDOW:
-            self._hide_news_window()
-            return
         if self.desktop.winfo_width() < MIN_NEWS_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_NEWS_WINDOW_HEIGHT:
             return
         desktop_width = max(self.desktop.winfo_width(), MIN_NEWS_WINDOW_WIDTH)
@@ -958,18 +1059,10 @@ class MarketTerminalApp(tk.Tk):
             highlightthickness=1,
         )
         self.watchlist_window.place(x=980, y=0, width=400, height=500)
-        self.watchlist_titlebar = tk.Frame(self.watchlist_window, bg=GRID, height=28, cursor="fleur")
+        self.watchlist_titlebar = tk.Frame(self.watchlist_window, bg=GRID, height=TITLEBAR_HEIGHT, cursor="fleur")
         self.watchlist_titlebar.pack(fill=tk.X)
         self.watchlist_titlebar.pack_propagate(False)
-        label = tk.Label(
-            self.watchlist_titlebar,
-            text="WATCHLIST",
-            bg=GRID,
-            fg=TEXT,
-            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
-            padx=9,
-        )
-        label.pack(side=tk.LEFT)
+        label = self._build_titlebar_label(self.watchlist_titlebar, "WATCHLIST")
         for widget in (self.watchlist_titlebar, label):
             widget.bind("<ButtonPress-1>", self._start_watchlist_window_drag)
             widget.bind("<B1-Motion>", self._drag_watchlist_window)
@@ -979,32 +1072,10 @@ class MarketTerminalApp(tk.Tk):
             self.watchlist_group_var,
             self._on_watchlist_group_changed,
         )
-        tk.Button(
-            self.watchlist_titlebar,
-            text=MAXIMIZE_ICON,
-            command=self._maximize_watchlist_window,
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
-            padx=6,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
-        tk.Button(
-            self.watchlist_titlebar,
-            text="R",
-            command=self.refresh_watchlist,
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
-            padx=8,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        self._build_titlebar_button(
+            self.watchlist_titlebar, MAXIMIZE_ICON, self._maximize_watchlist_window
+        )
+        self._build_titlebar_button(self.watchlist_titlebar, "R", self.refresh_watchlist)
         content = ttk.Frame(self.watchlist_window, style="Panel.TFrame", padding=7)
         content.pack(fill=tk.BOTH, expand=True)
         self.watchlist_tree = ttk.Treeview(
@@ -1087,35 +1158,15 @@ class MarketTerminalApp(tk.Tk):
         )
         if SHOW_MACRO_WINDOW:
             self.macro_window.place(x=0, y=530, width=430, height=340)
-        self.macro_titlebar = tk.Frame(self.macro_window, bg=GRID, height=28, cursor="fleur")
+        self.macro_titlebar = tk.Frame(self.macro_window, bg=GRID, height=TITLEBAR_HEIGHT, cursor="fleur")
         self.macro_titlebar.pack(fill=tk.X)
         self.macro_titlebar.pack_propagate(False)
-        label = tk.Label(
-            self.macro_titlebar,
-            text="MACRO",
-            bg=GRID,
-            fg=TEXT,
-            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
-            padx=9,
-        )
-        label.pack(side=tk.LEFT)
+        label = self._build_titlebar_label(self.macro_titlebar, "MACRO")
         for widget in (self.macro_titlebar, label):
             widget.bind("<ButtonPress-1>", self._start_macro_window_drag)
             widget.bind("<B1-Motion>", self._drag_macro_window)
             widget.bind("<ButtonRelease-1>", self._finish_macro_window_drag)
-        tk.Button(
-            self.macro_titlebar,
-            text=MAXIMIZE_ICON,
-            command=self._maximize_macro_window,
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
-            padx=6,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        self._build_titlebar_button(self.macro_titlebar, MAXIMIZE_ICON, self._maximize_macro_window)
         category_menu = tk.OptionMenu(
             self.macro_titlebar,
             self.macro_category_var,
@@ -1127,32 +1178,9 @@ class MarketTerminalApp(tk.Tk):
             "credit",
             command=lambda _value: self._populate_macro_placeholders(),
         )
-        category_menu.configure(
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
-            padx=6,
-            pady=0,
-            highlightthickness=0,
-        )
-        category_menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
+        self._configure_titlebar_menu(category_menu)
         category_menu.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
-        tk.Button(
-            self.macro_titlebar,
-            text="REFRESH",
-            command=self.refresh_macro_dashboard,
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
-            padx=8,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        self._build_titlebar_button(self.macro_titlebar, "R", self.refresh_macro_dashboard)
         content = ttk.Frame(self.macro_window, style="Panel.TFrame", padding=7)
         content.pack(fill=tk.BOTH, expand=True)
         self.macro_tree = ttk.Treeview(
@@ -1199,66 +1227,23 @@ class MarketTerminalApp(tk.Tk):
         )
         if SHOW_NEWS_WINDOW:
             self.news_window.place(x=460, y=520, width=820, height=360)
-        self.news_titlebar = tk.Frame(self.news_window, bg=GRID, height=28, cursor="fleur")
+        self.news_titlebar = tk.Frame(self.news_window, bg=GRID, height=TITLEBAR_HEIGHT, cursor="fleur")
         self.news_titlebar.pack(fill=tk.X)
         self.news_titlebar.pack_propagate(False)
-        label = tk.Label(
-            self.news_titlebar,
-            text="NEWS",
-            bg=GRID,
-            fg=TEXT,
-            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
-            padx=9,
-        )
-        label.pack(side=tk.LEFT)
+        label = self._build_titlebar_label(self.news_titlebar, "NEWS")
         for widget in (self.news_titlebar, label):
             widget.bind("<ButtonPress-1>", self._start_news_window_drag)
             widget.bind("<B1-Motion>", self._drag_news_window)
             widget.bind("<ButtonRelease-1>", self._finish_news_window_drag)
-        tk.Button(
-            self.news_titlebar,
-            text=MAXIMIZE_ICON,
-            command=self._maximize_news_window,
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 10, "bold"),
-            padx=6,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        self._build_titlebar_button(self.news_titlebar, MAXIMIZE_ICON, self._maximize_news_window)
         topic_menu = tk.OptionMenu(
             self.news_titlebar,
             self.news_topic_var,
             *tuple(query.label for query in default_news_queries()),
         )
-        topic_menu.configure(
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
-            padx=6,
-            pady=0,
-            highlightthickness=0,
-        )
-        topic_menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
+        self._configure_titlebar_menu(topic_menu, width=10)
         topic_menu.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
-        tk.Button(
-            self.news_titlebar,
-            text="REFRESH",
-            command=self.refresh_news_feed,
-            bg=GRID,
-            fg=MUTED,
-            activebackground=PANEL,
-            activeforeground=TEXT,
-            relief=tk.FLAT,
-            font=(TERMINAL_FONT_FAMILY, 8, "bold"),
-            padx=8,
-            pady=2,
-        ).pack(side=tk.RIGHT, padx=(0, 3), pady=3)
+        self._build_titlebar_button(self.news_titlebar, "R", self.refresh_news_feed)
         content = ttk.Frame(self.news_window, style="Panel.TFrame", padding=7)
         content.pack(fill=tk.BOTH, expand=True)
         self.news_tree = ttk.Treeview(
@@ -1330,6 +1315,9 @@ class MarketTerminalApp(tk.Tk):
                 continue
             self.watchlist_instruments.pop(item, None)
             self.watchlist_last_quotes.pop(item, None)
+            reset_after_id = self.watchlist_tick_reset_after_ids.pop(item, None)
+            if reset_after_id:
+                self.after_cancel(reset_after_id)
             self.watchlist_quote_inflight.discard(item)
             self.watchlist_tree.delete(item)
         if not self.watchlist_tree.get_children():
@@ -1588,7 +1576,7 @@ class MarketTerminalApp(tk.Tk):
         self.update_banner.pack_forget()
 
     def _reload_app(self) -> None:
-        self._save_window_state()
+        self._save_app_state()
         os.execl(sys.executable, sys.executable, *sys.argv)
 
     def _restore_window_state(self) -> None:
@@ -1618,37 +1606,31 @@ class MarketTerminalApp(tk.Tk):
             )
 
     def _close_app(self) -> None:
-        self._save_window_state()
-        self._save_watchlist_state()
         if self.layout_save_after_id:
             self.after_cancel(self.layout_save_after_id)
         if self.watchlist_refresh_after_id:
             self.after_cancel(self.watchlist_refresh_after_id)
-        if self.layout_dirty:
-            save_layout = messagebox.askyesno(
-                "Unsaved layout changes",
-                "You have unsaved changes in your layout. Save them?",
-                parent=self,
-            )
-            if save_layout:
-                self._save_function_layout()
+        self._save_app_state()
         self.destroy()
+
+    def _save_app_state(self) -> None:
+        self._save_window_state()
+        self._save_watchlist_state()
+        self._save_function_layout()
 
     def _schedule_function_layout_save(self) -> None:
         if self.layout_save_after_id:
             self.after_cancel(self.layout_save_after_id)
         self.layout_save_after_id = self.after(120, self._save_function_layout)
 
-    def _manual_save_function_layout(self) -> None:
-        self._save_function_layout(show_status=True)
-        self.layout_manually_saved = True
-
     def _save_function_layout(self, show_status: bool = False) -> None:
         self.layout_save_after_id = None
         self.update_idletasks()
         layout = {
-            "watchlist": window_place_geometry(self.watchlist_window),
-            "chart": window_place_geometry(self.chart_window),
+            "watchlist": window_layout_state(self.watchlist_window),
+            "chart": window_layout_state(self.chart_window),
+            "macro": window_layout_state(self.macro_window),
+            "news": window_layout_state(self.news_window),
             "watchlist_columns": self._watchlist_column_widths(),
         }
         save_layout_state(self.layout_state_path, layout)
@@ -1667,8 +1649,10 @@ class MarketTerminalApp(tk.Tk):
     def _current_function_layout(self) -> dict:
         self.update_idletasks()
         return {
-            "watchlist": window_place_geometry(self.watchlist_window),
-            "chart": window_place_geometry(self.chart_window),
+            "watchlist": window_layout_state(self.watchlist_window),
+            "chart": window_layout_state(self.chart_window),
+            "macro": window_layout_state(self.macro_window),
+            "news": window_layout_state(self.news_window),
             "watchlist_columns": self._watchlist_column_widths(),
         }
 
@@ -1999,10 +1983,15 @@ class MarketTerminalApp(tk.Tk):
                 padx=(8, 0),
                 before=self.chart_canvas_widget,
             )
+            self._update_compare_button_style()
             self._begin_add_to_compare()
             return
         self._keep_primary_series_only()
         self._hide_compare_panel()
+
+    def _toggle_compare_button(self) -> None:
+        self.compare_visible_var.set(not self.compare_visible_var.get())
+        self._toggle_compare_panel()
 
     def _keep_primary_series_only(self) -> None:
         if len(self.chart_instruments) <= 1:
@@ -2030,11 +2019,20 @@ class MarketTerminalApp(tk.Tk):
         self.beta_summary_label.pack_forget()
         self.display_mode_var.set("Prices")
         self._configure_series_tree_columns()
+        self._update_compare_button_style()
         self._redraw_current_chart()
         if self.suggestion_anchor == self.compare_search_entry:
             self._hide_suggestions(restore_focus=False)
             self._set_suggestion_anchor(self.search_entry)
         return "break"
+
+    def _update_compare_button_style(self) -> None:
+        if hasattr(self, "compare_button"):
+            self.compare_button.configure(
+                style="Selected.Header.TButton"
+                if self.compare_visible_var.get()
+                else "Header.TButton"
+            )
 
     def _hide_transient_panels(self) -> str:
         self.suggestion_popup.withdraw()
@@ -2056,6 +2054,7 @@ class MarketTerminalApp(tk.Tk):
 
     def _build_chart(self) -> None:
         self.figure = Figure(figsize=(8, 5), dpi=100, facecolor=BG)
+        self.figure.subplots_adjust(left=0.055, right=0.985, top=0.985, bottom=0.085)
         grid = self.figure.add_gridspec(4, 1, hspace=0.02)
         self.price_axis = self.figure.add_subplot(grid[:3, 0])
         self.volume_axis = self.figure.add_subplot(grid[3, 0], sharex=self.price_axis)
@@ -2063,7 +2062,7 @@ class MarketTerminalApp(tk.Tk):
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.chart_panel)
         self.chart_canvas_widget = self.canvas.get_tk_widget()
         self.chart_canvas_widget.pack(fill=tk.BOTH, expand=True)
-        self._build_chart_toolbar()
+        self._hide_chart_metadata_labels()
         self.chart_menu = tk.Menu(
             self,
             tearoff=False,
@@ -2095,20 +2094,31 @@ class MarketTerminalApp(tk.Tk):
             self.chart_panel, textvariable=self.hours_var, style="Status.TLabel", padding=(0, 5)
         ).pack(fill=tk.X)
 
+    def _hide_chart_metadata_labels(self) -> None:
+        for label in self._chart_metadata_labels():
+            label.pack_forget()
+            label.place_forget()
+
+    def _chart_metadata_labels(self) -> tuple[tk.Widget, ...]:
+        return (
+            self.identity_label,
+            self.quote_label,
+            self.fundamentals_label,
+            self.sec_context_label,
+            self.measurement_label,
+        )
+
     def _build_chart_toolbar(self) -> None:
         self.chart_toolbar = tk.Frame(
-            self.chart_canvas_widget,
-            bg=PANEL,
-            highlightbackground=GRID,
-            highlightthickness=1,
-            padx=5,
-            pady=5,
+            self.chart_titlebar,
+            bg=GRID,
         )
-        self.chart_toolbar.place(x=54, y=14)
+        self.chart_toolbar.pack(side=tk.RIGHT, padx=(0, 4), pady=2)
         self.time_range_button = ttk.Button(
             self.chart_toolbar,
-            text="TIME RANGE",
-            style="Selected.Chip.TButton",
+            text=self._time_range_button_label(),
+            width=3,
+            style="Selected.Header.TButton",
         )
         self.time_range_button.pack(side=tk.LEFT)
         self.time_range_button.bind(
@@ -2117,43 +2127,61 @@ class MarketTerminalApp(tk.Tk):
         self.time_range_button.bind("<Leave>", lambda _event: self._schedule_range_popup_hide())
         self.technical_button = ttk.Button(
             self.chart_toolbar,
-            text="TECHNICAL",
-            style="Chip.TButton",
+            text="T",
+            width=3,
+            style="Header.TButton",
         )
-        self.technical_button.pack(side=tk.LEFT, padx=(4, 10))
+        self.technical_button.pack(side=tk.LEFT, padx=(4, 8))
         self.technical_button.bind(
             "<Enter>", lambda _event: self._show_range_popup("Technical", self.technical_button)
         )
         self.technical_button.bind("<Leave>", lambda _event: self._schedule_range_popup_hide())
         self.extended_hours_check = ttk.Checkbutton(
             self.chart_toolbar,
-            text="EXT HRS",
+            text="E",
+            width=3,
+            style="Header.TCheckbutton",
             variable=self.extended_hours_var,
             command=self.refresh_chart,
         )
         self.extended_hours_check.pack(side=tk.LEFT, padx=(0, 8))
         self.extended_hours_check.state(["disabled"])
-        self.compare_button = ttk.Checkbutton(
+        self.compare_button = ttk.Button(
             self.chart_toolbar,
-            text="COMPARE [0]",
-            style="Chip.TCheckbutton",
-            variable=self.compare_visible_var,
-            command=self._toggle_compare_panel,
+            text="C",
+            width=3,
+            style="Header.TButton",
+            command=self._toggle_compare_button,
         )
         self.compare_button.pack(side=tk.LEFT)
+        self.price_render_button = ttk.Button(
+            self.chart_toolbar,
+            text=self._price_render_button_label(),
+            width=3,
+            style="Header.TButton",
+            command=self._cycle_price_render_mode,
+        )
+        self.price_render_button.pack(side=tk.LEFT, padx=(4, 0))
         self.sec_details_button = ttk.Button(
             self.chart_toolbar,
             text="SEC",
-            style="Chip.TButton",
+            width=3,
+            style="Header.TButton",
             command=self._show_sec_details,
         )
         self.sec_details_button.pack(side=tk.LEFT, padx=(8, 0))
         self.sec_details_button.state(["disabled"])
-        self.chart_toolbar.lift()
+        self._build_group_selector(
+            self.chart_toolbar,
+            self.chart_group_var,
+            self._on_chart_group_changed,
+        )
         self._build_range_popup()
         self._build_compare_panel()
 
     def _start_text_rectangle(self, event: tk.Event) -> str | None:
+        if event.widget in {getattr(self, "watchlist_tree", None), self.watchlist_editor}:
+            return None
         if not self._text_at_screen_point(event.x_root, event.y_root):
             return None
         self._clear_text_selection_outline()
@@ -2540,8 +2568,8 @@ class MarketTerminalApp(tk.Tk):
 
     def _update_range_selection(self) -> None:
         self.time_range_button.configure(
-            style="Selected.Chip.TButton",
-            text=f"TIME RANGE  {self.selected_range.label}",
+            style="Selected.Header.TButton",
+            text=self._time_range_button_label(),
         )
         for button, range_spec in self.range_buttons:
             button.configure(
@@ -2550,10 +2578,8 @@ class MarketTerminalApp(tk.Tk):
                 else "Flyout.TButton"
             )
         self.technical_button.configure(
-            style="Selected.Chip.TButton" if self.technical_study else "Chip.TButton",
-            text=f"TECHNICAL  {technical_study_label(self.technical_study)}"
-            if self.technical_study
-            else "TECHNICAL",
+            style="Selected.Header.TButton" if self.technical_study else "Header.TButton",
+            text="T",
         )
         for button, study in self.technical_buttons:
             button.configure(
@@ -2561,6 +2587,13 @@ class MarketTerminalApp(tk.Tk):
                 if study == self.technical_study and self.range_popup_mode == "Technical"
                 else "Flyout.TButton"
             )
+
+    def _time_range_button_label(self) -> str:
+        if self.selected_range.period == "custom":
+            return "C"
+        if self.selected_range.period == "1d":
+            return "D"
+        return self.selected_range.label.split("/")[0].strip().upper()
 
     def _choose_technical_study(self, study: tuple[str, int] | None) -> None:
         self.technical_study = study
@@ -2578,6 +2611,16 @@ class MarketTerminalApp(tk.Tk):
         self._update_beta_model()
         self._configure_series_tree_columns()
         self._update_series_tree()
+
+    def _cycle_price_render_mode(self) -> None:
+        modes = ("line", "ohlc", "candle")
+        current_index = modes.index(self.price_render_mode)
+        self.price_render_mode = modes[(current_index + 1) % len(modes)]
+        self.price_render_button.configure(text=self._price_render_button_label())
+        self._redraw_current_chart()
+
+    def _price_render_button_label(self) -> str:
+        return {"line": "L", "ohlc": "B", "candle": "K"}[self.price_render_mode]
 
     def _configure_series_tree_columns(self) -> None:
         if self.betas_comparison_var.get():
@@ -2852,8 +2895,9 @@ class MarketTerminalApp(tk.Tk):
         popup.bind("<Enter>", self._cancel_portfolio_quote_popup_hide)
         popup.bind("<Leave>", self._hide_portfolio_quote_popup)
         self.portfolio_quote_popup = popup
-        x = self.quote_label.winfo_rootx()
-        y = self.quote_label.winfo_rooty() + self.quote_label.winfo_height() + 4
+        anchor = getattr(self, "chart_header_summary_label", self.quote_label)
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height() + 4
         popup.geometry(f"760x320+{x}+{y}")
         popup.lift()
         frame = ttk.Frame(popup, style="Panel.TFrame", padding=7)
@@ -2969,7 +3013,7 @@ class MarketTerminalApp(tk.Tk):
 
     def _update_watchlist_quote(self, item: str, instrument: Instrument, quote, latency_ms: float) -> None:
         self.watchlist_quote_inflight.discard(item)
-        direction_tag = self._watchlist_tick_tag(item, quote)
+        direction_tag, is_tick_flash = self._watchlist_tick_tag(item, quote)
         values = (
             watchlist_asset_label(instrument),
             format_quote_value(quote.last),
@@ -2987,8 +3031,9 @@ class MarketTerminalApp(tk.Tk):
                 direction_tag,
             ),
         )
+        self._schedule_watchlist_tick_color_reset(item, quote, is_tick_flash)
 
-    def _watchlist_tick_tag(self, item: str, quote) -> str:
+    def _watchlist_tick_tag(self, item: str, quote) -> tuple[str, bool]:
         current = (quote.last, quote.bid, quote.ask)
         previous = self.watchlist_last_quotes.get(item)
         self.watchlist_last_quotes[item] = current
@@ -2996,8 +3041,29 @@ class MarketTerminalApp(tk.Tk):
             for old, new in zip(previous, current):
                 if old is None or new is None or old == new:
                     continue
-                return "tick_up" if new > old else "tick_down"
-        return quote_change_tag(quote.change, quote.change_percent)
+                return ("tick_up" if new > old else "tick_down"), True
+        return quote_change_tag(quote.change, quote.change_percent), False
+
+    def _schedule_watchlist_tick_color_reset(self, item: str, quote, is_tick_flash: bool) -> None:
+        reset_after_id = self.watchlist_tick_reset_after_ids.pop(item, None)
+        if reset_after_id:
+            self.after_cancel(reset_after_id)
+        if not is_tick_flash:
+            return
+        fallback_tag = quote_change_tag(quote.change, quote.change_percent)
+
+        def reset_color() -> None:
+            self.watchlist_tick_reset_after_ids.pop(item, None)
+            if item not in self.watchlist_instruments or not self.watchlist_tree.exists(item):
+                return
+            self.watchlist_tree.item(
+                item,
+                tags=watchlist_item_tags(self.watchlist_tree.index(item), fallback_tag),
+            )
+
+        self.watchlist_tick_reset_after_ids[item] = self.after(
+            WATCHLIST_TICK_FLASH_MS, reset_color
+        )
 
     def _update_watchlist_quote_error(
         self, item: str, instrument: Instrument, exc: Exception
@@ -3066,7 +3132,7 @@ class MarketTerminalApp(tk.Tk):
         self.series_tree.delete(*self.series_tree.get_children())
         if self.betas_comparison_var.get():
             self._populate_beta_series_tree()
-            self.compare_button.configure(text=f"COMPARE [{len(self.chart_instruments)}]")
+            self._update_compare_button_style()
             return
         for position, instrument in enumerate(self.chart_instruments):
             self.series_tree.insert(
@@ -3075,7 +3141,7 @@ class MarketTerminalApp(tk.Tk):
                 iid=str(position),
                 values=(instrument.symbol, instrument.name, instrument.exchange),
             )
-        self.compare_button.configure(text=f"COMPARE [{len(self.chart_instruments)}]")
+        self._update_compare_button_style()
 
     def _populate_beta_series_tree(self) -> None:
         if not self.chart_instruments:
@@ -3143,7 +3209,8 @@ class MarketTerminalApp(tk.Tk):
         self._hide_compare_panel()
         self._clear_chart("Search for an asset, then choose Open or Add.")
         self.identity_var.set("")
-        self.quote_var.set("Search for an asset to begin.")
+        self.quote_var.set("")
+        self.chart_header_summary_var.set("")
         self.fundamentals_var.set("")
         self.sec_context_var.set("")
         self.session_var.set("")
@@ -3236,18 +3303,19 @@ class MarketTerminalApp(tk.Tk):
         self._install_zoom_selector()
         plot_frames = displayed_close_series(visible_frames, self.display_mode_var.get())
         for position, instrument in enumerate(instruments):
-            closes = plot_frames[instrument.symbol]
-            color = price_move_color(
-                visible_frames[instrument.symbol],
-                SERIES_COLORS[position % len(SERIES_COLORS)],
-            )
-            self.price_axis.plot(
-                closes.index,
-                closes,
-                color=color,
-                linewidth=1.5,
-                label=instrument.symbol,
-            )
+            frame_for_symbol = visible_frames[instrument.symbol]
+            color = price_move_color(frame_for_symbol, SERIES_COLORS[position % len(SERIES_COLORS)])
+            if position == 0 and len(instruments) == 1 and self.display_mode_var.get() == "Prices":
+                self._draw_primary_price_series(frame_for_symbol, instrument.symbol, color)
+            else:
+                closes = plot_frames[instrument.symbol]
+                self.price_axis.plot(
+                    closes.index,
+                    closes,
+                    color=color,
+                    linewidth=1.5,
+                    label=instrument.symbol,
+                )
         frame = visible_frames[primary.symbol]
         primary_closes = frame["Close"]
         first = float(primary_closes.iloc[0])
@@ -3255,12 +3323,10 @@ class MarketTerminalApp(tk.Tk):
         change = last - first
         pct = (change / first * 100) if first else 0.0
         currency = f" {primary.currency}" if primary.currency else ""
-        view_label = "Rebased 100" if self.display_mode_var.get() == "Rebased 100" else "Price"
         self.identity_var.set(instrument_identity_text(primary))
-        self.quote_var.set(
-            f"{primary.symbol}  {primary.name}    {last:,.4f}{currency}   "
-            f"{change:+,.4f} ({pct:+.2f}%)   [{range_spec.label}]"
-            f" | {len(instruments)} series | {view_label}"
+        self.quote_var.set("")
+        self.chart_header_summary_var.set(
+            chart_header_summary_text(primary, frame, last, change, pct, currency)
         )
         self.fundamentals_var.set(instrument_fundamentals_text(primary))
         self._refresh_sec_context(primary)
@@ -3428,6 +3494,63 @@ class MarketTerminalApp(tk.Tk):
             style="Accent.TButton",
             command=open_selected_filing,
         ).pack(side=tk.RIGHT)
+
+    def _draw_primary_price_series(self, frame: pd.DataFrame, symbol: str, color: str) -> None:
+        if self.price_render_mode == "ohlc" and {"High", "Low"}.issubset(frame.columns):
+            self._draw_high_low_bars(frame, symbol)
+            return
+        if self.price_render_mode == "candle" and {"Open", "High", "Low", "Close"}.issubset(frame.columns):
+            self._draw_candles(frame, symbol)
+            return
+        self.price_axis.plot(
+            frame.index,
+            frame["Close"],
+            color=color,
+            linewidth=1.5,
+            label=symbol,
+        )
+
+    def _draw_high_low_bars(self, frame: pd.DataFrame, symbol: str) -> None:
+        data = frame[["High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna()
+        if data.empty:
+            return
+        width = _bar_width(data) * 0.35
+        x_values = mdates.date2num(data.index.to_pydatetime())
+        self.price_axis.vlines(data.index, data["Low"], data["High"], color=MUTED, linewidth=0.9)
+        self.price_axis.hlines(
+            data["Close"],
+            x_values - width / 2,
+            x_values + width / 2,
+            color=ORANGE,
+            linewidth=1.0,
+            label=symbol,
+        )
+
+    def _draw_candles(self, frame: pd.DataFrame, symbol: str) -> None:
+        data = frame[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna()
+        if data.empty:
+            return
+        width = _bar_width(data) * 0.55
+        self.price_axis.vlines(data.index, data["Low"], data["High"], color=MUTED, linewidth=0.8)
+        for timestamp, row in data.iterrows():
+            open_price = float(row["Open"])
+            close_price = float(row["Close"])
+            low = min(open_price, close_price)
+            height = max(abs(close_price - open_price), 1e-9)
+            color = UP if close_price >= open_price else DOWN
+            left = mdates.date2num(timestamp) - width / 2
+            self.price_axis.add_patch(
+                Rectangle(
+                    (left, low),
+                    width,
+                    height,
+                    facecolor=color,
+                    edgecolor=color,
+                    linewidth=0.7,
+                    alpha=0.82,
+                )
+            )
+        self.price_axis.plot([], [], color=ORANGE, label=symbol)
 
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
         if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):
@@ -3875,13 +3998,18 @@ class MarketTerminalApp(tk.Tk):
             self.volume_axis.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
         else:
             self.volume_axis.xaxis.set_major_formatter(mdates.DateFormatter("%d %b\n%Y"))
-        self.figure.autofmt_xdate(rotation=0, ha="center")
+        for label in self.volume_axis.get_xticklabels():
+            label.set_rotation(0)
+            label.set_ha("center")
+        self.figure.subplots_adjust(left=0.055, right=0.985, top=0.985, bottom=0.085)
 
     def _clear_chart(self, text: str) -> None:
         self.current_frame = pd.DataFrame()
         self.current_frames = {}
         self._clear_hover()
         self._clear_measurement()
+        self.quote_var.set("")
+        self.chart_header_summary_var.set("")
         self.price_axis.clear()
         self.volume_axis.clear()
         self.study_axis.clear()
@@ -4016,6 +4144,12 @@ def window_place_geometry(widget: tk.Widget) -> dict[str, int]:
         "width": int(widget.winfo_width()),
         "height": int(widget.winfo_height()),
     }
+
+
+def window_layout_state(widget: tk.Widget) -> dict[str, int | bool]:
+    state = window_place_geometry(widget)
+    state["visible"] = widget.winfo_manager() == "place"
+    return state
 
 
 def save_watchlist_state(path: Path, rows: list[dict]) -> None:
@@ -4369,6 +4503,38 @@ def instrument_fundamentals_text(instrument: Instrument) -> str:
     if instrument.market_cap is not None:
         return f"Market Cap: {format_currency_size(instrument.market_cap)}"
     return ""
+
+
+def chart_header_summary_text(
+    instrument: Instrument,
+    frame: pd.DataFrame,
+    last: float,
+    change: float,
+    change_percent: float,
+    currency: str = "",
+) -> str:
+    parts = [instrument.symbol]
+    if instrument.isin:
+        parts.append(instrument.isin)
+    parts.append(f"{last:,.2f}{currency}")
+    parts.append(f"{change:+,.2f} ({change_percent:+.2f}%)")
+    if "Volume" in frame.columns and not frame.empty:
+        volume = pd.to_numeric(frame["Volume"], errors="coerce").dropna()
+        if not volume.empty:
+            parts.append(f"Vol {format_volume_value(float(volume.iloc[-1]))}")
+    market_cap = format_billions(instrument.market_cap)
+    if market_cap:
+        parts.append(f"MKT {market_cap}")
+    aum = format_billions(instrument.aum)
+    if aum:
+        parts.append(f"AUM {aum}")
+    return "  |  ".join(parts)
+
+
+def format_billions(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value / 1_000_000_000:,.1f}B"
 
 
 def watchlist_asset_label(instrument: Instrument) -> str:
