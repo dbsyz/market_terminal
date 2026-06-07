@@ -63,6 +63,8 @@ class MarketEvent:
     source: str = "Yahoo Finance"
     note: str = ""
     is_date_only: bool = False
+    prediction: str = ""
+    actual: str = ""
 
 
 INTRADAY_MATRIX = (

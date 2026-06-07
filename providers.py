@@ -50,6 +50,7 @@ _BLOOMBERG_TO_YAHOO_EXCHANGE = {
     "US": "",
 }
 _EURONEXT_SEARCH_ENDPOINT = "https://live.euronext.com/en/instrumentSearch/searchJSON"
+_NFIN_ENDPOINT = "https://api.nfin.dev"
 _YAHOO_TO_EURONEXT_MIC = {
     ".AS": "XAMS",
     ".BR": "XBRU",
@@ -323,6 +324,51 @@ class StooqClient:
         return frame.dropna(subset=["Close"])
 
 
+class NfinCalendarClient:
+    endpoint = _NFIN_ENDPOINT
+
+    def __init__(self, api_key: str | None = None, session: requests.Session | None = None) -> None:
+        self.api_key = api_key or os.getenv("NFIN_API_KEY", "")
+        self.session = session or requests.Session()
+
+    @property
+    def enabled(self) -> bool:
+        return os.getenv("NFIN_DISABLE", "0") != "1"
+
+    def market_events(self, instrument: Instrument, limit: int = 16) -> list[MarketEvent]:
+        symbol = nfin_symbol_from_instrument(instrument)
+        if not self.enabled or not symbol:
+            return []
+        events: list[MarketEvent] = []
+        events.extend(_nfin_quote_dividend_events(self._get(f"quote/{symbol}/dividends"), symbol))
+        events.extend(_nfin_upcoming_recent_events(self._get("calendar/upcoming-recent"), symbol))
+        for route, parser in (
+            ("calendar/earnings", _nfin_earnings_events),
+            ("calendar/dividends", _nfin_dividend_events),
+            ("calendar/splits", _nfin_split_events),
+            ("ipo/calendar", _nfin_ipo_events),
+        ):
+            payload = self._get(route)
+            rows = _nfin_rows(payload)
+            events.extend(parser(rows, symbol))
+            if len(events) >= limit:
+                break
+        return select_market_events(events, limit)
+
+    def _get(self, route: str) -> object:
+        headers = {"User-Agent": "market-terminal/0.1"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-Nfin-Key"] = self.api_key
+        response = self.session.get(
+            f"{self.endpoint}/v1/{route}",
+            headers=headers,
+            timeout=12,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 class BinanceSpotClient:
     endpoint = "https://api.binance.com"
 
@@ -453,12 +499,14 @@ class MarketDataProvider:
         twelve: TwelveDataClient | None = None,
         stooq: StooqClient | None = None,
         binance: BinanceSpotClient | None = None,
+        nfin: NfinCalendarClient | None = None,
     ) -> None:
         configure_yfinance_cache()
         self.figi = figi or OpenFigiClient()
         self.twelve = twelve or TwelveDataClient()
         self.stooq = stooq or StooqClient()
         self.binance = binance or BinanceSpotClient()
+        self.nfin = nfin or NfinCalendarClient()
         self._yahoo_lock = Lock()
         self._last_yahoo_request_at = 0.0
         self._history_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
@@ -591,7 +639,13 @@ class MarketDataProvider:
             events.extend(_events_from_yahoo_earnings_dates(ticker.get_earnings_dates(limit=limit)))
         except Exception:
             pass
-        result = _unique_market_events(events)[:limit]
+        nfin = getattr(self, "nfin", None)
+        if nfin is not None:
+            try:
+                events.extend(nfin.market_events(instrument, limit=limit))
+            except Exception:
+                pass
+        result = select_market_events(events, limit)
         self._store_market_events(instrument, limit, result)
         return result
 
@@ -1018,6 +1072,384 @@ def _unique_market_events(events: list[MarketEvent]) -> list[MarketEvent]:
     return list(unique.values())
 
 
+def select_market_events(
+    events: list[MarketEvent],
+    limit: int = 16,
+    recent_limit: int = 4,
+    now: datetime | None = None,
+) -> list[MarketEvent]:
+    if limit <= 0:
+        return []
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    unique = _unique_market_events(events)
+    upcoming = [event for event in unique if _event_datetime_utc(event) >= current]
+    recent = [event for event in unique if _event_datetime_utc(event) < current]
+    upcoming.sort(key=_market_event_sort_key)
+    recent.sort(key=_market_event_sort_key, reverse=True)
+    selected_recent = recent[: min(recent_limit, limit)]
+    selected_upcoming = upcoming[: max(limit - len(selected_recent), 0)]
+    return sorted(selected_upcoming + selected_recent, key=_market_event_sort_key)
+
+
+def _event_datetime_utc(event: MarketEvent) -> datetime:
+    timestamp = event.timestamp or datetime.max.replace(tzinfo=timezone.utc)
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def nfin_symbol_from_instrument(instrument: Instrument) -> str:
+    symbol = instrument.symbol.strip().upper()
+    if not symbol or symbol == PORTFOLIO_INDEX_SYMBOL:
+        return ""
+    if any(marker in symbol for marker in (".", "=", "^", "/", " ")):
+        return ""
+    quote_type = instrument.quote_type.upper()
+    if quote_type and quote_type not in {"EQUITY", "STOCK", "ETF", "FUND", "MUTUALFUND"}:
+        return ""
+    return symbol
+
+
+def _nfin_rows(payload: object) -> list[dict]:
+    rows = _nfin_find_rows(payload)
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _nfin_find_rows(value: object) -> list:
+    if isinstance(value, list):
+        if all(isinstance(item, dict) for item in value):
+            return value
+        for item in value:
+            rows = _nfin_find_rows(item)
+            if rows:
+                return rows
+        return []
+    if not isinstance(value, dict):
+        return []
+    rows = value.get("rows")
+    if isinstance(rows, list):
+        return rows
+    for key in ("table", "data", "calendar", "earnings", "dividends", "splits", "ipos"):
+        rows = _nfin_find_rows(value.get(key))
+        if rows:
+            return rows
+    for nested in value.values():
+        rows = _nfin_find_rows(nested)
+        if rows:
+            return rows
+    return []
+
+
+def _nfin_row_symbol(row: dict) -> str:
+    for key in (
+        "symbol",
+        "ticker",
+        "tickerSymbol",
+        "proposedTickerSymbol",
+        "companySymbol",
+    ):
+        value = str(row.get(key, "") or "").strip().upper()
+        if value:
+            return value
+    url = str(row.get("url", "") or "")
+    match = re.search(r"/stocks/([A-Za-z0-9]+)", url)
+    return match.group(1).upper() if match else ""
+
+
+def _nfin_matching_rows(rows: list[dict], symbol: str) -> list[dict]:
+    return [row for row in rows if _nfin_row_symbol(row) == symbol]
+
+
+def _nfin_quote_dividend_events(payload: object, symbol: str) -> list[MarketEvent]:
+    data = _nfin_payload_data(payload)
+    rows = _nfin_find_rows(data.get("dividends") if isinstance(data, dict) else data)
+    events = []
+    for row in [item for item in rows if isinstance(item, dict)]:
+        for event, keys in (
+            ("Ex-dividend", ("exOrEffDate", "exDivDate", "exDividendDate")),
+            ("Dividend record", ("recordDate",)),
+            ("Dividend payable", ("paymentDate", "dividendPaymentDate")),
+        ):
+            timestamp, is_date_only = _nfin_row_timestamp(row, keys)
+            if timestamp is None:
+                continue
+            note_parts = _nfin_note_parts(
+                row,
+                (
+                    ("Amount", "amount"),
+                    ("Type", "type"),
+                    ("Currency", "currency"),
+                ),
+            )
+            events.append(
+                MarketEvent(
+                    timestamp=timestamp,
+                    event=event,
+                    event_type="Dividend",
+                    source="nfin Nasdaq quote dividends",
+                    note=_nfin_note(note_parts),
+                    is_date_only=is_date_only,
+                )
+            )
+    if events:
+        return events
+    if not isinstance(data, dict):
+        return []
+    for event, keys in (
+        ("Ex-dividend", ("exDividendDate",)),
+        ("Dividend payable", ("dividendPaymentDate",)),
+    ):
+        timestamp, is_date_only = _nfin_row_timestamp(data, keys)
+        if timestamp is None:
+            continue
+        note_parts = _nfin_note_parts(
+            data,
+            (
+                ("Annualized", "annualizedDividend"),
+                ("Yield", "yield"),
+            ),
+        )
+        events.append(
+            MarketEvent(
+                timestamp=timestamp,
+                event=event,
+                event_type="Dividend",
+                source="nfin Nasdaq quote dividends",
+                note=_nfin_note(note_parts),
+                is_date_only=is_date_only,
+            )
+        )
+    return events
+
+
+def _nfin_upcoming_recent_events(payload: object, symbol: str) -> list[MarketEvent]:
+    data = _nfin_payload_data(payload)
+    if not isinstance(data, dict):
+        return []
+    events = []
+    for group_key, group_label in (("upcomingEvents", "Upcoming"), ("recentEvents", "Recent")):
+        group = data.get(group_key)
+        rows = _nfin_find_rows(group)
+        for row in [item for item in rows if isinstance(item, dict)]:
+            if _nfin_row_symbol(row) != symbol:
+                continue
+            timestamp, is_date_only = _nfin_row_timestamp(row, ("eventDate", "date"))
+            if timestamp is None:
+                continue
+            name = str(row.get("eventName") or row.get("name") or "Event").strip()
+            event_type = _nfin_event_type(name)
+            events.append(
+                MarketEvent(
+                    timestamp=timestamp,
+                    event=name,
+                    event_type=event_type,
+                    source="nfin Nasdaq upcoming/recent",
+                    note=f"Best-effort Nasdaq {group_label.lower()} event via nfin",
+                    is_date_only=is_date_only,
+                )
+            )
+    return events
+
+
+def _nfin_payload_data(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return payload
+    data = payload.get("data")
+    if isinstance(data, dict) and "data" in data:
+        return data.get("data")
+    return data if data is not None else payload
+
+
+def _nfin_event_type(name: str) -> str:
+    normalized = name.casefold()
+    if "earn" in normalized:
+        return "Earnings"
+    if "dividend" in normalized:
+        return "Dividend"
+    if "split" in normalized:
+        return "Split"
+    if "ipo" in normalized:
+        return "IPO"
+    if "filing" in normalized:
+        return "Filing"
+    return "Event"
+
+
+def _nfin_earnings_events(rows: list[dict], symbol: str) -> list[MarketEvent]:
+    events = []
+    for row in _nfin_matching_rows(rows, symbol):
+        timestamp, is_date_only = _nfin_row_timestamp(
+            row,
+            ("date", "earningsDate", "reportDate", "eventDate"),
+        )
+        if timestamp is None:
+            continue
+        note_parts = _nfin_note_parts(
+            row,
+            (
+                ("Fiscal Q", "fiscalQuarterEnding"),
+                ("Revenue est", "revenueForecast"),
+                ("Time", "time"),
+            ),
+        )
+        prediction = _nfin_prediction(row, ("epsForecast", "revenueForecast"))
+        actual = _nfin_actual(row, ("eps", "revenue"))
+        events.append(
+            MarketEvent(
+                timestamp=timestamp,
+                event="Earnings",
+                event_type="Earnings",
+                source="nfin Nasdaq calendar",
+                note=_nfin_note(note_parts),
+                is_date_only=is_date_only,
+                prediction=prediction,
+                actual=actual,
+            )
+        )
+    return events
+
+
+def _nfin_dividend_events(rows: list[dict], symbol: str) -> list[MarketEvent]:
+    events = []
+    for row in _nfin_matching_rows(rows, symbol):
+        for event, event_type, keys in (
+            ("Ex-dividend", "Dividend", ("exDivDate", "exDividendDate", "exDate")),
+            ("Dividend record", "Dividend", ("recordDate",)),
+            ("Dividend payable", "Dividend", ("paymentDate", "payDate")),
+        ):
+            timestamp, is_date_only = _nfin_row_timestamp(row, keys)
+            if timestamp is None:
+                continue
+            note_parts = _nfin_note_parts(
+                row,
+                (
+                    ("Amount", "dividend"),
+                    ("Amount", "amount"),
+                    ("Annualized", "annualizedDividend"),
+                ),
+            )
+            events.append(
+                MarketEvent(
+                    timestamp=timestamp,
+                    event=event,
+                    event_type=event_type,
+                    source="nfin Nasdaq calendar",
+                    note=_nfin_note(note_parts),
+                    is_date_only=is_date_only,
+                )
+            )
+    return events
+
+
+def _nfin_split_events(rows: list[dict], symbol: str) -> list[MarketEvent]:
+    events = []
+    for row in _nfin_matching_rows(rows, symbol):
+        timestamp, is_date_only = _nfin_row_timestamp(
+            row,
+            ("executionDate", "splitDate", "exDate", "eventDate"),
+        )
+        if timestamp is None:
+            continue
+        note_parts = _nfin_note_parts(
+            row,
+            (
+                ("Ratio", "ratio"),
+                ("From", "fromFactor"),
+                ("To", "toFactor"),
+            ),
+        )
+        events.append(
+            MarketEvent(
+                timestamp=timestamp,
+                event="Split",
+                event_type="Split",
+                source="nfin Nasdaq calendar",
+                note=_nfin_note(note_parts),
+                is_date_only=is_date_only,
+            )
+        )
+    return events
+
+
+def _nfin_ipo_events(rows: list[dict], symbol: str) -> list[MarketEvent]:
+    events = []
+    for row in _nfin_matching_rows(rows, symbol):
+        timestamp, is_date_only = _nfin_row_timestamp(
+            row,
+            ("pricedDate", "expectedDate", "ipoDate", "date"),
+        )
+        if timestamp is None:
+            continue
+        note_parts = _nfin_note_parts(
+            row,
+            (
+                ("Company", "companyName"),
+                ("Exchange", "exchange"),
+                ("Price", "price"),
+                ("Shares", "shares"),
+            ),
+        )
+        events.append(
+            MarketEvent(
+                timestamp=timestamp,
+                event="IPO",
+                event_type="IPO",
+                source="nfin Nasdaq calendar",
+                note=_nfin_note(note_parts),
+                is_date_only=is_date_only,
+            )
+        )
+    return events
+
+
+def _nfin_row_timestamp(row: dict, keys: tuple[str, ...]) -> tuple[datetime | None, bool]:
+    for key in keys:
+        timestamp, is_date_only = _event_timestamp(row.get(key))
+        if timestamp is not None:
+            return timestamp, is_date_only
+    return None, False
+
+
+def _nfin_note_parts(row: dict, fields: tuple[tuple[str, str], ...]) -> list[str]:
+    parts = []
+    seen: set[str] = set()
+    for label, key in fields:
+        value = str(row.get(key, "") or "").strip()
+        if not value or value in {"-", "--", "N/A"}:
+            continue
+        part = f"{label} {value}"
+        if part not in seen:
+            parts.append(part)
+            seen.add(part)
+    return parts
+
+
+def _nfin_note(parts: list[str]) -> str:
+    base = "Best-effort Nasdaq calendar via nfin"
+    return f"{base} | {' | '.join(parts)}" if parts else base
+
+
+def _nfin_prediction(row: dict, keys: tuple[str, ...]) -> str:
+    return _nfin_metric_text(row, keys)
+
+
+def _nfin_actual(row: dict, keys: tuple[str, ...]) -> str:
+    return _nfin_metric_text(row, keys)
+
+
+def _nfin_metric_text(row: dict, keys: tuple[str, ...]) -> str:
+    parts = []
+    for key in keys:
+        value = str(row.get(key, "") or "").strip()
+        if not value or value in {"-", "--", "N/A", "0"}:
+            continue
+        label = "EPS" if "eps" in key.casefold() else "Rev"
+        parts.append(f"{label} {value}")
+    return " | ".join(parts)
+
+
 def _market_event_sort_key(event: MarketEvent) -> tuple[int, datetime, str]:
     timestamp = event.timestamp or datetime.max.replace(tzinfo=timezone.utc)
     if timestamp.tzinfo is None:
@@ -1056,6 +1488,8 @@ def _events_from_yahoo_earnings_dates(frame: object) -> list[MarketEvent]:
         if timestamp is None:
             continue
         note_parts = []
+        prediction_parts = []
+        actual_parts = []
         for label, column in (
             ("EPS est", "EPS Estimate"),
             ("EPS actual", "Reported EPS"),
@@ -1065,6 +1499,12 @@ def _events_from_yahoo_earnings_dates(frame: object) -> list[MarketEvent]:
             parsed = _as_optional_float(value)
             if parsed is not None:
                 note_parts.append(f"{label} {parsed:g}")
+                if column == "EPS Estimate":
+                    prediction_parts.append(f"EPS {parsed:g}")
+                elif column == "Reported EPS":
+                    actual_parts.append(f"EPS {parsed:g}")
+                elif column == "Surprise(%)":
+                    actual_parts.append(f"Surp {parsed:g}%")
         events.append(
             MarketEvent(
                 timestamp=timestamp,
@@ -1073,6 +1513,8 @@ def _events_from_yahoo_earnings_dates(frame: object) -> list[MarketEvent]:
                 source="Yahoo Finance earnings dates",
                 note=" | ".join(note_parts) or "Best-effort public Yahoo earnings date",
                 is_date_only=is_date_only,
+                prediction=" | ".join(prediction_parts),
+                actual=" | ".join(actual_parts),
             )
         )
     return events

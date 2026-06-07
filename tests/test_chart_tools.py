@@ -14,14 +14,22 @@ from market_terminal.app import (
     PRICE_RENDER_MODES,
     UP,
     anchored_text_bounds,
+    beta_table_column_width,
     calculate_return,
     calculate_beta_model,
     chart_date_bounds,
     comparison_date_bounds,
+    comparison_latest_value_label,
     comparison_price_bounds,
+    comparison_series_color,
+    comparison_series_colors,
+    comparison_y_axis_label,
     constrain_window_geometry,
     custom_range_spec,
     displayed_close_series,
+    market_event_display_sort_key,
+    event_price_move_since_text,
+    market_event_is_past,
     filter_and_sort_instruments,
     fit_popup_to_window,
     format_market_cap,
@@ -34,6 +42,7 @@ from market_terminal.app import (
     load_window_geometry,
     load_window_state,
     load_layout_state,
+    normalized_app_settings,
     normalized_watchlist_column_widths,
     normalized_rectangle,
     ordered_text_blocks,
@@ -46,8 +55,10 @@ from market_terminal.app import (
     save_window_geometry,
     save_watchlist_state,
     save_layout_state,
+    range_spec_state,
     source_file_snapshot,
     technical_indicator,
+    technical_study_state,
     technical_study_label,
     watchlist_asset_label,
     watchlist_group_label,
@@ -59,7 +70,14 @@ from market_terminal.app import (
     watchlist_row_from_instrument,
     watchlist_row_stripe,
 )
-from market_terminal.models import HISTORICAL_RANGES, INTRADAY_MATRIX, Instrument, QuoteSnapshot
+from market_terminal.models import (
+    HISTORICAL_RANGES,
+    INTRADAY_MATRIX,
+    INTRADAY_RANGES,
+    Instrument,
+    MarketEvent,
+    QuoteSnapshot,
+)
 
 
 class ReturnCalculationTests(unittest.TestCase):
@@ -140,6 +158,23 @@ class MoveColorTests(unittest.TestCase):
 
         self.assertEqual(widths["asset"], 125)
         self.assertEqual(widths["change"], 80)
+
+    def test_beta_table_column_width_is_uniform_and_compact_for_short_values(self) -> None:
+        width = beta_table_column_width(
+            [
+                ("Y: AAPL", "", "", "", ""),
+                ("MSFT", "+1.235", "0.042", "+29.12", "<.001"),
+            ]
+        )
+
+        self.assertGreaterEqual(width, 46)
+        self.assertLessEqual(width, 74)
+        self.assertEqual(width, 67)
+
+    def test_beta_table_column_width_caps_long_symbols(self) -> None:
+        width = beta_table_column_width([("VERY_LONG_SYMBOL", "+1.235", "0.042", "+29.12", "<.001")])
+
+        self.assertEqual(width, 74)
 
 
 class ChartDateBoundsTests(unittest.TestCase):
@@ -359,6 +394,79 @@ class InstrumentIdentityTests(unittest.TestCase):
 
             self.assertEqual(load_layout_state(path), layout)
 
+    def test_normalizes_saved_app_settings_for_chart_view_restore(self) -> None:
+        settings = normalized_app_settings(
+            {
+                "chart_mode": "Historical",
+                "selected_range": range_spec_state(HISTORICAL_RANGES[2]),
+                "price_render_mode": "hollow_candles",
+                "display_mode": "Rebased 100",
+                "compare_panel_visible": True,
+                "rebase_comparison": True,
+                "betas_comparison": True,
+                "technical_study": technical_study_state(("RSI", 14)),
+                "extended_hours": True,
+                "intraday_custom_bar": "30m",
+                "chart_group": "C",
+                "watchlist_group": "D",
+                "event_group": "E",
+                "macro_category": "labor",
+                "news_topic": "Macro",
+                "search_sort": "Market Cap",
+                "chart_instruments": [
+                    watchlist_row_from_instrument(Instrument("AAPL", "Apple")),
+                    watchlist_row_from_instrument(Instrument("MSFT", "Microsoft")),
+                ],
+            }
+        )
+
+        self.assertEqual(settings["chart_mode"], "Historical")
+        self.assertEqual(settings["selected_range"], HISTORICAL_RANGES[2])
+        self.assertEqual(settings["price_render_mode"], "hollow_candles")
+        self.assertEqual(settings["display_mode"], "Rebased 100")
+        self.assertTrue(settings["compare_panel_visible"])
+        self.assertTrue(settings["rebase_comparison"])
+        self.assertTrue(settings["betas_comparison"])
+        self.assertEqual(settings["technical_study"], ("RSI", 14))
+        self.assertTrue(settings["extended_hours"])
+        self.assertEqual(settings["chart_group"], "C")
+        self.assertEqual(settings["macro_category"], "labor")
+        self.assertEqual(settings["news_topic"], "Macro")
+        self.assertEqual(settings["search_sort"], "Market Cap")
+        self.assertEqual([instrument.symbol for instrument in settings["chart_instruments"]], ["AAPL", "MSFT"])
+
+    def test_saved_app_settings_fall_back_for_invalid_values(self) -> None:
+        settings = normalized_app_settings(
+            {
+                "chart_mode": "Bad",
+                "selected_range": {"period": "custom", "interval": "2m", "start": "bad", "end": "2026-01-02"},
+                "price_render_mode": "bad",
+                "display_mode": "Rebased 100",
+                "compare_panel_visible": True,
+                "rebase_comparison": True,
+                "betas_comparison": True,
+                "technical_study": {"name": "RSI", "period": 999},
+                "chart_group": "Z",
+                "macro_category": "bad",
+                "news_topic": "bad",
+                "search_sort": "bad",
+                "chart_instruments": [watchlist_row_from_instrument(Instrument("AAPL", "Apple"))],
+            }
+        )
+
+        self.assertEqual(settings["chart_mode"], "Intraday")
+        self.assertEqual(settings["selected_range"], INTRADAY_RANGES[0])
+        self.assertEqual(settings["price_render_mode"], "bars")
+        self.assertEqual(settings["display_mode"], "Prices")
+        self.assertFalse(settings["compare_panel_visible"])
+        self.assertFalse(settings["rebase_comparison"])
+        self.assertFalse(settings["betas_comparison"])
+        self.assertIsNone(settings["technical_study"])
+        self.assertEqual(settings["chart_group"], "A")
+        self.assertEqual(settings["macro_category"], "rates")
+        self.assertEqual(settings["news_topic"], "Markets")
+        self.assertEqual(settings["search_sort"], "Relevance")
+
 
 class TextSelectionTests(unittest.TestCase):
     def test_normalizes_drag_direction_and_detects_overlapping_text(self) -> None:
@@ -391,6 +499,57 @@ class TextSelectionTests(unittest.TestCase):
 
         self.assertTrue(rectangles_intersect(text_bounds, (45, 25, 45, 25)))
         self.assertFalse(rectangles_intersect(text_bounds, (300, 25, 300, 25)))
+
+
+class EventDisplayTests(unittest.TestCase):
+    def test_event_price_move_since_uses_next_available_close(self) -> None:
+        frame = pd.DataFrame(
+            {"Close": [100.0, 105.0, 110.0]},
+            index=pd.to_datetime(["2026-05-08", "2026-05-11", "2026-05-12"]),
+        )
+        event = MarketEvent(
+            timestamp=pd.Timestamp("2026-05-10", tz="UTC").to_pydatetime(),
+            event="Earnings",
+            event_type="Earnings",
+            is_date_only=True,
+        )
+
+        self.assertEqual(event_price_move_since_text(event, frame), "+4.76%")
+
+    def test_event_price_move_since_omits_future_events(self) -> None:
+        frame = pd.DataFrame(
+            {"Close": [100.0, 105.0]},
+            index=pd.to_datetime(["2026-05-08", "2026-05-11"]),
+        )
+        event = MarketEvent(
+            timestamp=pd.Timestamp("2026-05-12", tz="UTC").to_pydatetime(),
+            event="Earnings",
+            event_type="Earnings",
+        )
+
+        self.assertEqual(event_price_move_since_text(event, frame), "")
+
+    def test_market_events_sort_oldest_to_newest_for_display(self) -> None:
+        events = [
+            MarketEvent(pd.Timestamp("2026-06-10", tz="UTC").to_pydatetime(), "Future", "Event"),
+            MarketEvent(pd.Timestamp("2026-05-01", tz="UTC").to_pydatetime(), "Past", "Event"),
+        ]
+
+        self.assertEqual(
+            [event.event for event in sorted(events, key=market_event_display_sort_key)],
+            ["Past", "Future"],
+        )
+
+    def test_market_event_is_past_uses_current_utc_time(self) -> None:
+        event = MarketEvent(
+            pd.Timestamp("2026-05-01", tz="UTC").to_pydatetime(),
+            "Past",
+            "Event",
+        )
+
+        self.assertTrue(
+            market_event_is_past(event, pd.Timestamp("2026-06-01", tz="UTC").to_pydatetime())
+        )
 
 
 class SourceUpdateTests(unittest.TestCase):
@@ -457,6 +616,41 @@ class ComparisonSeriesTests(unittest.TestCase):
         displayed = displayed_close_series({"A": frame}, "Rebased 100")
 
         self.assertEqual(list(displayed["A"]), [100.0, 120.0])
+
+    def test_comparison_y_axis_label_lists_all_symbols(self) -> None:
+        self.assertEqual(
+            comparison_y_axis_label(["AAPL", "MSFT", "SPY"], "Prices"),
+            "Price: AAPL, MSFT, SPY",
+        )
+        self.assertEqual(
+            comparison_y_axis_label(["AAPL", "MSFT"], "Rebased 100"),
+            "Indexed (100): AAPL, MSFT",
+        )
+
+    def test_single_series_y_axis_label_keeps_short_unit_label(self) -> None:
+        self.assertEqual(comparison_y_axis_label(["AAPL"], "Prices"), "Price")
+        self.assertEqual(comparison_y_axis_label(["AAPL"], "Rebased 100"), "Indexed (100)")
+
+    def test_comparison_value_labels_include_symbol_and_latest_value(self) -> None:
+        self.assertEqual(comparison_latest_value_label("MSFT", 432.123), "MSFT 432.12")
+
+    def test_comparison_colors_are_stable_across_directional_moves(self) -> None:
+        rising = pd.DataFrame({"Close": [100.0, 101.0]})
+        falling = pd.DataFrame({"Close": [200.0, 199.0]})
+
+        colors = comparison_series_colors(
+            [Instrument("AAPL", "Apple"), Instrument("MSFT", "Microsoft")],
+            {"AAPL": rising, "MSFT": falling},
+        )
+
+        self.assertEqual(colors["AAPL"], "#f6a400")
+        self.assertEqual(colors["MSFT"], "#42a5f5")
+        self.assertNotEqual(colors["AAPL"], colors["MSFT"])
+
+    def test_single_series_color_still_reflects_price_move(self) -> None:
+        rising = pd.DataFrame({"Close": [100.0, 101.0]})
+
+        self.assertEqual(comparison_series_color(rising, 0, 1), UP)
 
     def test_comparison_bounds_include_all_displayed_series(self) -> None:
         frames = {

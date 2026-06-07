@@ -7,12 +7,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import market_terminal.portfolio_index as portfolio_index
-from market_terminal.models import HISTORICAL_RANGES, INTRADAY_RANGES, Instrument, RangeSpec
+from market_terminal.models import HISTORICAL_RANGES, INTRADAY_RANGES, Instrument, MarketEvent, RangeSpec
 from market_terminal.models import QuoteSnapshot
 from market_terminal.portfolio_index import _first_trade_date, build_portfolio_monitor_report, portfolio_index_files
 from market_terminal.providers import (
     BinanceSpotClient,
     MarketDataProvider,
+    NfinCalendarClient,
     OpenFigiClient,
     StooqClient,
     TwelveDataClient,
@@ -20,7 +21,9 @@ from market_terminal.providers import (
     binance_symbol_from_query,
     build_market_session,
     detect_identifier,
+    nfin_symbol_from_instrument,
     score_history_frame,
+    select_market_events,
     yahoo_symbol_from_terminal_query,
 )
 
@@ -55,6 +58,12 @@ class IdentifierDetectionTests(unittest.TestCase):
         duplicate = Instrument("AAPL", "Apple Inc")
         microsoft = Instrument("MSFT", "Microsoft")
         self.assertEqual(_unique_instruments([apple, duplicate, microsoft]), [apple, microsoft])
+
+    def test_nfin_symbol_accepts_us_style_equities_only(self) -> None:
+        self.assertEqual(nfin_symbol_from_instrument(Instrument("AAPL", "Apple")), "AAPL")
+        self.assertEqual(nfin_symbol_from_instrument(Instrument("SPY", "SPY ETF", quote_type="ETF")), "SPY")
+        self.assertEqual(nfin_symbol_from_instrument(Instrument("KRW.PA", "Amundi")), "")
+        self.assertEqual(nfin_symbol_from_instrument(Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")), "")
 
 
 class StubResponse:
@@ -108,6 +117,17 @@ class GetSession:
         return self.response
 
 
+class NfinSession:
+    def __init__(self, payloads) -> None:
+        self.payloads = payloads
+        self.requests = []
+
+    def get(self, endpoint, headers, timeout):
+        self.requests.append((endpoint, headers, timeout))
+        route = endpoint.rsplit("/v1/", 1)[1]
+        return RequestResponse(self.payloads.get(route, {"data": {"data": {"rows": []}}}))
+
+
 class OpenFigiTests(unittest.TestCase):
     def test_maps_identifier_and_passes_optional_key(self) -> None:
         session = StubSession()
@@ -120,6 +140,173 @@ class OpenFigiTests(unittest.TestCase):
         self.assertEqual(instruments[0].isin, "US0378331005")
         self.assertEqual(session.request[1], [{"idType": "ID_ISIN", "idValue": "US0378331005"}])
         self.assertEqual(session.request[2]["X-OPENFIGI-APIKEY"], "key")
+
+
+class NfinCalendarTests(unittest.TestCase):
+    def test_parses_matching_earnings_dividend_split_and_ipo_rows(self) -> None:
+        session = NfinSession(
+            {
+                "calendar/earnings": {
+                    "data": {
+                        "data": {
+                            "headers": {},
+                            "rows": [
+                                {
+                                    "symbol": "AAPL",
+                                    "date": "07/25/2026",
+                                    "epsForecast": "$1.25",
+                                    "time": "After Market Close",
+                                },
+                                {"symbol": "MSFT", "date": "07/26/2026"},
+                            ],
+                        }
+                    }
+                },
+                "calendar/dividends": {
+                    "data": {
+                        "data": {
+                            "rows": [
+                                {
+                                    "symbol": "AAPL",
+                                    "exDivDate": "08/01/2026",
+                                    "paymentDate": "08/15/2026",
+                                    "dividend": "$0.25",
+                                }
+                            ]
+                        }
+                    }
+                },
+                "calendar/splits": {
+                    "data": {
+                        "data": {
+                            "rows": [
+                                {
+                                    "symbol": "AAPL",
+                                    "executionDate": "09/01/2026",
+                                    "ratio": "4:1",
+                                }
+                            ]
+                        }
+                    }
+                },
+                "ipo/calendar": {
+                    "data": {
+                        "data": {
+                            "rows": [
+                                {
+                                    "proposedTickerSymbol": "AAPL",
+                                    "pricedDate": "10/01/2026",
+                                    "companyName": "Apple Test IPO",
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        )
+        client = NfinCalendarClient(session=session)
+
+        events = client.market_events(Instrument("AAPL", "Apple"), limit=10)
+
+        self.assertEqual(
+            [event.event for event in events],
+            ["Earnings", "Ex-dividend", "Dividend payable", "Split", "IPO"],
+        )
+        self.assertEqual(events[0].source, "nfin Nasdaq calendar")
+        self.assertEqual(events[0].prediction, "EPS $1.25")
+        self.assertTrue(all(event.is_date_only for event in events))
+        self.assertEqual(len(session.requests), 6)
+
+    def test_sends_optional_api_key_headers(self) -> None:
+        session = NfinSession({})
+        client = NfinCalendarClient(api_key="nfin_live_test", session=session)
+
+        client.market_events(Instrument("AAPL", "Apple"), limit=1)
+
+        self.assertEqual(session.requests[0][1]["Authorization"], "Bearer nfin_live_test")
+        self.assertEqual(session.requests[0][1]["X-Nfin-Key"], "nfin_live_test")
+
+    def test_uses_symbol_scoped_quote_dividends_and_recent_events(self) -> None:
+        session = NfinSession(
+            {
+                "quote/AAPL/dividends": {
+                    "data": {
+                        "data": {
+                            "dividends": {
+                                "rows": [
+                                    {
+                                        "exOrEffDate": "05/11/2026",
+                                        "amount": "$0.27",
+                                        "recordDate": "05/11/2026",
+                                        "paymentDate": "05/14/2026",
+                                        "currency": "USD",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                "calendar/upcoming-recent": {
+                    "data": {
+                        "data": {
+                            "recentEvents": {
+                                "events": [
+                                    {
+                                        "eventName": "Earnings Date",
+                                        "eventDate": "04/30/2026",
+                                        "url": "/market-activity/stocks/AAPL/earnings",
+                                    },
+                                    {
+                                        "eventName": "Earnings Date",
+                                        "eventDate": "04/30/2026",
+                                        "url": "/market-activity/stocks/MSFT/earnings",
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                },
+            }
+        )
+        client = NfinCalendarClient(session=session)
+
+        events = client.market_events(Instrument("AAPL", "Apple"), limit=10)
+
+        self.assertEqual(
+            [event.event for event in events],
+            ["Earnings Date", "Dividend record", "Ex-dividend", "Dividend payable"],
+        )
+        self.assertEqual(events[0].source, "nfin Nasdaq upcoming/recent")
+        self.assertEqual(events[1].source, "nfin Nasdaq quote dividends")
+        self.assertIn("Amount $0.27", events[1].note)
+
+
+class MarketEventSelectionTests(unittest.TestCase):
+    def test_selects_upcoming_events_and_four_most_recent_past_events(self) -> None:
+        events = [
+            MarketEvent(pd.Timestamp(date, tz="UTC").to_pydatetime(), label, "Event")
+            for date, label in (
+                ("2026-05-01", "old"),
+                ("2026-05-15", "recent-3"),
+                ("2026-05-20", "recent-2"),
+                ("2026-05-25", "recent-1"),
+                ("2026-05-30", "recent-0"),
+                ("2026-06-10", "upcoming-0"),
+                ("2026-06-20", "upcoming-1"),
+            )
+        ]
+
+        selected = select_market_events(
+            events,
+            limit=6,
+            recent_limit=4,
+            now=pd.Timestamp("2026-06-01", tz="UTC").to_pydatetime(),
+        )
+
+        self.assertEqual(
+            [event.event for event in selected],
+            ["recent-3", "recent-2", "recent-1", "recent-0", "upcoming-0", "upcoming-1"],
+        )
 
 
 class StubFigi:
@@ -656,6 +843,71 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(events[0].source, "Yahoo Finance calendar")
         self.assertEqual(events[1].event, "Ex-dividend")
         self.assertTrue(events[1].is_date_only)
+
+    def test_market_events_merges_nfin_calendar_rows_with_yahoo_events(self) -> None:
+        class TickerStub:
+            def get_calendar(self):
+                return {"Earnings Date": [pd.Timestamp("2026-07-25 12:30", tz="UTC")]}
+
+            def get_earnings_dates(self, limit=16):
+                return pd.DataFrame()
+
+        class NfinStub:
+            def market_events(self, instrument, limit=16):
+                return [
+                    providers.MarketEvent(
+                        timestamp=pd.Timestamp("2026-08-01", tz="UTC").to_pydatetime(),
+                        event="Ex-dividend",
+                        event_type="Dividend",
+                        source="nfin Nasdaq calendar",
+                        note="Best-effort Nasdaq calendar via nfin",
+                        is_date_only=True,
+                    )
+                ]
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            provider.binance = None
+            provider.nfin = NfinStub()
+            events = provider.market_events(Instrument("AAPL", "Apple"))
+        finally:
+            providers.yf.Ticker = original_ticker
+
+        self.assertEqual([event.source for event in events], ["Yahoo Finance calendar", "nfin Nasdaq calendar"])
+
+    def test_yahoo_earnings_dates_split_prediction_and_print_fields(self) -> None:
+        class TickerStub:
+            def get_calendar(self):
+                return {}
+
+            def get_earnings_dates(self, limit=16):
+                return pd.DataFrame(
+                    {
+                        "EPS Estimate": [1.25],
+                        "Reported EPS": [1.35],
+                        "Surprise(%)": [8.0],
+                    },
+                    index=pd.DatetimeIndex([pd.Timestamp("2026-07-25", tz="UTC")]),
+                )
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            provider.binance = None
+            provider.nfin = None
+            events = provider.market_events(Instrument("AAPL", "Apple"))
+        finally:
+            providers.yf.Ticker = original_ticker
+
+        self.assertEqual(events[0].prediction, "EPS 1.25")
+        self.assertEqual(events[0].actual, "EPS 1.35 | Surp 8%")
 
     def test_euronext_listing_uses_official_search_isin_fallback(self) -> None:
         class TickerStub:

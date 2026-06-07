@@ -10,7 +10,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from tkinter import messagebox, simpledialog, ttk
@@ -80,6 +80,16 @@ WATCHLIST_COLUMNS = (
     ("latency", "Latency", 65),
 )
 WATCHLIST_MIN_COLUMN_WIDTH = 35
+BETA_SERIES_COLUMNS = ("symbol", "beta", "stderr", "tstat", "pvalue")
+BETA_SERIES_HEADINGS = {
+    "symbol": "Series",
+    "beta": "Beta",
+    "stderr": "SE",
+    "tstat": "t",
+    "pvalue": "p",
+}
+BETA_SERIES_MIN_COLUMN_WIDTH = 46
+BETA_SERIES_MAX_COLUMN_WIDTH = 74
 SERIES_COLORS = (
     "#f6a400",
     "#42a5f5",
@@ -242,14 +252,16 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_state_path = state_root / "watchlist.json"
         self.saved_window_state = load_window_state(self.window_state_path)
         self.saved_layout_state = load_layout_state(self.layout_state_path)
+        self.saved_settings = normalized_app_settings(self.saved_layout_state.get("settings"))
         self.startup_layout_state = json.loads(json.dumps(self.saved_layout_state))
         self.saved_watchlist_state = load_watchlist_state(self.watchlist_state_path)
         self.geometry(self.saved_window_state["geometry"])
 
         self.search_var = tk.StringVar(value="")
+        self.compare_search_var = tk.StringVar(value="")
         self.watchlist_search_var = tk.StringVar(value="")
         self.event_search_var = tk.StringVar(value="")
-        self.mode_var = tk.StringVar(value="Intraday")
+        self.mode_var = tk.StringVar(value=self.saved_settings["chart_mode"])
         self.status_var = tk.StringVar(
             value="Public/delayed market data via Yahoo Finance | Identifier mapping via OpenFIGI"
         )
@@ -261,24 +273,24 @@ class MarketTerminalApp(tk.Tk):
         self.measurement_var = tk.StringVar(value="")
         self.session_var = tk.StringVar(value="")
         self.hours_var = tk.StringVar(value="")
-        self.extended_hours_var = tk.BooleanVar(value=False)
-        self.display_mode_var = tk.StringVar(value="Prices")
-        self.price_render_mode = "bars"
-        self.compare_visible_var = tk.BooleanVar(value=False)
-        self.rebase_comparison_var = tk.BooleanVar(value=False)
-        self.betas_comparison_var = tk.BooleanVar(value=False)
-        self.technical_study: tuple[str, int] | None = None
+        self.extended_hours_var = tk.BooleanVar(value=self.saved_settings["extended_hours"])
+        self.display_mode_var = tk.StringVar(value=self.saved_settings["display_mode"])
+        self.price_render_mode = self.saved_settings["price_render_mode"]
+        self.compare_visible_var = tk.BooleanVar(value=self.saved_settings["compare_panel_visible"])
+        self.rebase_comparison_var = tk.BooleanVar(value=self.saved_settings["rebase_comparison"])
+        self.betas_comparison_var = tk.BooleanVar(value=self.saved_settings["betas_comparison"])
+        self.technical_study: tuple[str, int] | None = self.saved_settings["technical_study"]
         self.intraday_start_var = tk.StringVar(value="")
         self.intraday_end_var = tk.StringVar(value="")
-        self.intraday_custom_bar_var = tk.StringVar(value="15m")
+        self.intraday_custom_bar_var = tk.StringVar(value=self.saved_settings["intraday_custom_bar"])
         self.historical_start_var = tk.StringVar(value="")
         self.historical_end_var = tk.StringVar(value="")
-        self.chart_group_var = tk.StringVar(value="A")
-        self.watchlist_group_var = tk.StringVar(value="A")
-        self.event_group_var = tk.StringVar(value="A")
-        self.macro_category_var = tk.StringVar(value="rates")
+        self.chart_group_var = tk.StringVar(value=self.saved_settings["chart_group"])
+        self.watchlist_group_var = tk.StringVar(value=self.saved_settings["watchlist_group"])
+        self.event_group_var = tk.StringVar(value=self.saved_settings["event_group"])
+        self.macro_category_var = tk.StringVar(value=self.saved_settings["macro_category"])
         self.macro_status_var = tk.StringVar(value="FRED macro dashboard")
-        self.news_topic_var = tk.StringVar(value="Markets")
+        self.news_topic_var = tk.StringVar(value=self.saved_settings["news_topic"])
         self.news_status_var = tk.StringVar(value="Live news via GDELT. Click REFRESH to load.")
         self.event_status_var = tk.StringVar(value="Select a grouped watchlist stock or search.")
         self.local_time_var = tk.StringVar(value="")
@@ -286,11 +298,11 @@ class MarketTerminalApp(tk.Tk):
         self.london_time_var = tk.StringVar(value="")
         self.hong_kong_time_var = tk.StringVar(value="")
         self.search_action_var = tk.StringVar(value="OPEN SECURITY")
-        self.search_sort_var = tk.StringVar(value="Relevance")
+        self.search_sort_var = tk.StringVar(value=self.saved_settings["search_sort"])
         self.exchange_filter_var = tk.StringVar(value="All Markets")
         self.results: list[Instrument] = []
         self.raw_results: list[Instrument] = []
-        self.chart_instruments: list[Instrument] = []
+        self.chart_instruments: list[Instrument] = list(self.saved_settings["chart_instruments"])
         self.watchlist_instruments: dict[str, Instrument] = {}
         self.watchlist_target_item: str | None = None
         self.watchlist_editor: tk.Entry | None = None
@@ -312,8 +324,10 @@ class MarketTerminalApp(tk.Tk):
         self.event_search_update_internal = False
         self.add_to_compare_mode = False
         self.suggestion_anchor = None
-        self.selected_instrument: Instrument | None = None
-        self.selected_range = INTRADAY_RANGES[0]
+        self.selected_instrument: Instrument | None = (
+            self.chart_instruments[0] if self.chart_instruments else None
+        )
+        self.selected_range = self.saved_settings["selected_range"]
         self.range_buttons: list[ttk.Button] = []
         self.technical_buttons: list[tuple[ttk.Button, tuple[str, int] | None]] = []
         self.range_popup_mode: str | None = None
@@ -323,6 +337,7 @@ class MarketTerminalApp(tk.Tk):
         self.chart_request_id = 0
         self.current_frame = pd.DataFrame()
         self.current_frames: dict[str, pd.DataFrame] = {}
+        self.current_series_colors: dict[str, str] = {}
         self.current_session = MarketSession()
         self.beta_model_stats: BetaModelStats | None = None
         self.hover_artists = []
@@ -357,6 +372,7 @@ class MarketTerminalApp(tk.Tk):
         self._build_controls()
         self._build_chart()
         self.search_var.trace_add("write", self._on_search_text_changed)
+        self.compare_search_var.trace_add("write", self._on_compare_search_text_changed)
         self.watchlist_search_var.trace_add("write", self._on_watchlist_search_text_changed)
         self.event_search_var.trace_add("write", self._on_event_search_text_changed)
         self.bind("<ButtonPress-1>", self._dismiss_suggestions_on_click, add="+")
@@ -368,7 +384,7 @@ class MarketTerminalApp(tk.Tk):
         self.bind_all("<Escape>", self._cancel_text_selection, add="+")
         self.bind("<Configure>", self._schedule_window_geometry_save, add="+")
         self.protocol("WM_DELETE_WINDOW", self._close_app)
-        self._set_mode("Intraday")
+        self._restore_startup_chart_state()
         self.after_idle(self._restore_window_state)
         self._tick_header_clocks()
         self.after(SOURCE_WATCH_INTERVAL_MS, self._poll_for_source_update)
@@ -928,12 +944,15 @@ class MarketTerminalApp(tk.Tk):
 
     def _on_chart_group_changed(self, _value: str | None = None) -> None:
         self.status_var.set(f"Chart linked to group {self.chart_group_var.get()}.")
+        self._schedule_function_layout_save()
 
     def _on_watchlist_group_changed(self, _value: str | None = None) -> None:
         self.status_var.set(f"Watchlist linked to group {self.watchlist_group_var.get()}.")
+        self._schedule_function_layout_save()
 
     def _on_event_group_changed(self, _value: str | None = None) -> None:
         self.status_var.set(f"Event calendar linked to group {self.event_group_var.get()}.")
+        self._schedule_function_layout_save()
         selected = self.watchlist_tree.selection() if hasattr(self, "watchlist_tree") else ()
         if selected:
             instrument = self.watchlist_instruments.get(selected[0])
@@ -1484,7 +1503,7 @@ class MarketTerminalApp(tk.Tk):
             "growth",
             "money",
             "credit",
-            command=lambda _value: self._populate_macro_placeholders(),
+            command=self._select_macro_category,
         )
         self._configure_titlebar_menu(category_menu)
         category_menu.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
@@ -1548,6 +1567,7 @@ class MarketTerminalApp(tk.Tk):
             self.news_titlebar,
             self.news_topic_var,
             *tuple(query.label for query in default_news_queries()),
+            command=self._select_news_topic,
         )
         self._configure_titlebar_menu(topic_menu, width=10)
         topic_menu.pack(side=tk.RIGHT, padx=(0, 3), pady=3)
@@ -1637,18 +1657,22 @@ class MarketTerminalApp(tk.Tk):
         content.pack(fill=tk.BOTH, expand=True)
         self.event_tree = ttk.Treeview(
             content,
-            columns=("date", "time", "event", "type", "source"),
+            columns=("date", "time", "event", "prediction", "print", "move", "source"),
             show="headings",
             height=8,
             style="Watchlist.Treeview",
         )
         self.event_tree.tag_configure("watchlist_even", background=WATCHLIST_ROW_EVEN)
         self.event_tree.tag_configure("watchlist_odd", background=WATCHLIST_ROW_ODD)
+        self.event_tree.tag_configure("past_even", background=WATCHLIST_ROW_EVEN, foreground=MUTED)
+        self.event_tree.tag_configure("past_odd", background=WATCHLIST_ROW_ODD, foreground=MUTED)
         for column, title, width in (
             ("date", "Date", 95),
             ("time", "Time (Local)", 95),
             ("event", "Event", 180),
-            ("type", "Type", 95),
+            ("prediction", "Prediction", 120),
+            ("print", "Print", 120),
+            ("move", "% Move", 82),
             ("source", "Source / Note", 210),
         ):
             self.event_tree.heading(column, text=title, anchor=tk.CENTER)
@@ -2145,6 +2169,7 @@ class MarketTerminalApp(tk.Tk):
             "macro": window_layout_state(self.macro_window),
             "news": window_layout_state(self.news_window),
             "watchlist_columns": self._watchlist_column_widths(),
+            "settings": self._app_settings_state(),
         }
         save_layout_state(self.layout_state_path, layout)
         self.saved_layout_state = layout
@@ -2168,6 +2193,31 @@ class MarketTerminalApp(tk.Tk):
             "macro": window_layout_state(self.macro_window),
             "news": window_layout_state(self.news_window),
             "watchlist_columns": self._watchlist_column_widths(),
+            "settings": self._app_settings_state(),
+        }
+
+    def _app_settings_state(self) -> dict:
+        return {
+            "chart_mode": self.mode_var.get(),
+            "selected_range": range_spec_state(self.selected_range),
+            "price_render_mode": self.price_render_mode,
+            "display_mode": self.display_mode_var.get(),
+            "compare_panel_visible": bool(self.compare_visible_var.get()),
+            "rebase_comparison": bool(self.rebase_comparison_var.get()),
+            "betas_comparison": bool(self.betas_comparison_var.get()),
+            "technical_study": technical_study_state(self.technical_study),
+            "extended_hours": bool(self.extended_hours_var.get()),
+            "intraday_custom_bar": self.intraday_custom_bar_var.get(),
+            "chart_group": self.chart_group_var.get(),
+            "watchlist_group": self.watchlist_group_var.get(),
+            "event_group": self.event_group_var.get(),
+            "macro_category": self.macro_category_var.get(),
+            "news_topic": self.news_topic_var.get(),
+            "search_sort": self.search_sort_var.get(),
+            "chart_instruments": [
+                watchlist_row_from_instrument(instrument)
+                for instrument in self.chart_instruments
+            ],
         }
 
     def _watchlist_column_widths(self) -> dict[str, int]:
@@ -2208,7 +2258,7 @@ class MarketTerminalApp(tk.Tk):
             state="readonly",
         )
         self.search_sort.pack(side=tk.LEFT, padx=(5, 12))
-        self.search_sort.bind("<<ComboboxSelected>>", lambda _event: self._render_search_results())
+        self.search_sort.bind("<<ComboboxSelected>>", self._on_search_sort_changed)
         ttk.Label(filters, text="Market", style="Status.TLabel").pack(side=tk.LEFT)
         self.exchange_filter = ttk.Combobox(
             filters,
@@ -2296,7 +2346,19 @@ class MarketTerminalApp(tk.Tk):
             panel_content, textvariable=self.beta_summary_var, style="Status.TLabel"
         )
         self.series_tree = ttk.Treeview(
-            panel_content, columns=("symbol", "name", "venue"), show="headings", height=8
+            panel_content,
+            columns=("symbol", "name", "venue"),
+            show="headings",
+            height=8,
+            style="Watchlist.Treeview",
+        )
+        self.series_tree.tag_configure("watchlist_even", background=WATCHLIST_ROW_EVEN)
+        self.series_tree.tag_configure("watchlist_odd", background=WATCHLIST_ROW_ODD)
+        self.series_tree.tag_configure(
+            "watchlist_group",
+            background=GRID,
+            foreground=ORANGE,
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         self.series_tree.heading("symbol", text="Symbol")
         self.series_tree.heading("name", text="Description")
@@ -2308,7 +2370,7 @@ class MarketTerminalApp(tk.Tk):
         self.series_tree.bind("<Escape>", lambda _event: self._hide_compare_panel())
         self.compare_search_entry = tk.Entry(
             panel_content,
-            textvariable=self.search_var,
+            textvariable=self.compare_search_var,
             bg=BG,
             fg=TEXT,
             insertbackground=TEXT,
@@ -2386,6 +2448,21 @@ class MarketTerminalApp(tk.Tk):
             return
         self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
 
+    def _on_compare_search_text_changed(self, *_args) -> None:
+        if self.suggestion_anchor != self.compare_search_entry:
+            return
+        if self.search_after_id:
+            self.after_cancel(self.search_after_id)
+            self.search_after_id = None
+        query = self.compare_search_var.get().strip()
+        if not query:
+            self.search_request_id += 1
+            self.results = []
+            self.raw_results = []
+            self._hide_suggestions(restore_focus=False)
+            return
+        self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
+
     def _on_watchlist_search_text_changed(self, *_args) -> None:
         if self.suggestion_anchor != self.watchlist_editor:
             return
@@ -2419,6 +2496,8 @@ class MarketTerminalApp(tk.Tk):
         self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
 
     def _active_search_query(self) -> str:
+        if self.suggestion_anchor == self.compare_search_entry:
+            return self.compare_search_var.get().strip()
         if self.suggestion_anchor == self.watchlist_editor:
             return self.watchlist_search_var.get().strip()
         if self.suggestion_anchor == self.event_search_entry:
@@ -2514,6 +2593,8 @@ class MarketTerminalApp(tk.Tk):
         if not self.text_selection_dragging:
             self._clear_text_selection_outline()
         active_anchors = [self.search_entry]
+        if hasattr(self, "compare_search_entry"):
+            active_anchors.append(self.compare_search_entry)
         if hasattr(self, "event_search_entry"):
             active_anchors.append(self.event_search_entry)
         if self.watchlist_editor is not None:
@@ -2559,6 +2640,7 @@ class MarketTerminalApp(tk.Tk):
         self.betas_comparison_var.set(False)
         self.display_mode_var.set("Prices")
         self._update_series_tree()
+        self._schedule_function_layout_save()
         self.status_var.set("Comparison series removed; primary asset remains open.")
 
     def _hide_compare_panel(self) -> str:
@@ -2574,7 +2656,9 @@ class MarketTerminalApp(tk.Tk):
         self._redraw_current_chart()
         if self.suggestion_anchor == self.compare_search_entry:
             self._hide_suggestions(restore_focus=False)
+            self.compare_search_var.set("")
             self._set_suggestion_anchor(self.search_entry)
+        self._schedule_function_layout_save()
         return "break"
 
     def _update_compare_button_style(self) -> None:
@@ -2597,7 +2681,7 @@ class MarketTerminalApp(tk.Tk):
         self.suggestion_anchor = self.compare_search_entry
         self.compare_search_entry.focus_set()
         self.compare_search_entry.selection_range(0, tk.END)
-        if self.search_var.get().strip() and self.results:
+        if self.compare_search_var.get().strip() and self.results:
             self.result_tree.selection_remove(*self.result_tree.get_children())
             self.result_tree.focus("")
             self._show_suggestions()
@@ -2695,7 +2779,7 @@ class MarketTerminalApp(tk.Tk):
             width=3,
             style="Header.TCheckbutton",
             variable=self.extended_hours_var,
-            command=self.refresh_chart,
+            command=self._toggle_extended_hours,
         )
         self._set_tooltip(self.extended_hours_check, "Toggle extended-hours price data when available.")
         self.extended_hours_check.pack(side=tk.LEFT, padx=(0, 8))
@@ -3098,6 +3182,40 @@ class MarketTerminalApp(tk.Tk):
         self.range_hide_after_id = None
         self.range_popup.withdraw()
 
+    def _restore_startup_chart_state(self) -> None:
+        self._sync_custom_range_inputs()
+        if len(self.chart_instruments) < 2:
+            self.rebase_comparison_var.set(False)
+            self.betas_comparison_var.set(False)
+            self.display_mode_var.set("Prices")
+        self._configure_series_tree_columns()
+        self._update_series_tree()
+        self._update_range_selection()
+        self._update_price_render_button()
+        if self.compare_visible_var.get():
+            self.compare_panel.pack(
+                side=tk.RIGHT,
+                fill=tk.Y,
+                padx=(8, 0),
+                before=self.chart_canvas_widget,
+            )
+            self._update_compare_button_style()
+            self.add_to_compare_mode = True
+            self.suggestion_anchor = self.compare_search_entry
+        if self.chart_instruments:
+            self.after_idle(self.refresh_chart)
+
+    def _sync_custom_range_inputs(self) -> None:
+        if self.selected_range.period != "custom":
+            return
+        if self.mode_var.get() == "Intraday":
+            self.intraday_start_var.set(self.selected_range.start or "")
+            self.intraday_end_var.set(self.selected_range.end or "")
+            self.intraday_custom_bar_var.set(self.selected_range.interval)
+            return
+        self.historical_start_var.set(self.selected_range.start or "")
+        self.historical_end_var.set(self.selected_range.end or "")
+
     def _set_mode(self, mode: str) -> None:
         self.mode_var.set(mode)
         if mode == "Intraday":
@@ -3105,6 +3223,7 @@ class MarketTerminalApp(tk.Tk):
         else:
             self.selected_range = HISTORICAL_RANGES[0]
         self._update_range_selection()
+        self._schedule_function_layout_save()
         if self.chart_instruments:
             self.refresh_chart()
 
@@ -3112,8 +3231,10 @@ class MarketTerminalApp(tk.Tk):
         if mode:
             self.mode_var.set(mode)
         self.selected_range = range_spec
+        self._sync_custom_range_inputs()
         self._update_range_selection()
         self._hide_range_popup()
+        self._schedule_function_layout_save()
         self.refresh_chart()
 
     def _apply_custom_range(self, mode: str) -> None:
@@ -3170,18 +3291,25 @@ class MarketTerminalApp(tk.Tk):
         self.technical_study = study
         self._update_range_selection()
         self._hide_range_popup()
+        self._schedule_function_layout_save()
         self._redraw_current_chart()
 
     def _set_comparison_rebase(self) -> None:
         self.display_mode_var.set(
             "Rebased 100" if self.rebase_comparison_var.get() else "Prices"
         )
+        self._schedule_function_layout_save()
         self._redraw_current_chart()
 
     def _set_comparison_betas(self) -> None:
         self._update_beta_model()
         self._configure_series_tree_columns()
         self._update_series_tree()
+        self._schedule_function_layout_save()
+
+    def _toggle_extended_hours(self) -> None:
+        self._schedule_function_layout_save()
+        self.refresh_chart()
 
     def _cycle_price_render_mode(self) -> None:
         current_index = PRICE_RENDER_MODES.index(self.price_render_mode)
@@ -3189,6 +3317,7 @@ class MarketTerminalApp(tk.Tk):
             (current_index + 1) % len(PRICE_RENDER_MODES)
         ]
         self._update_price_render_button()
+        self._schedule_function_layout_save()
         self._redraw_current_chart()
 
     def _update_price_render_button(self) -> None:
@@ -3203,26 +3332,34 @@ class MarketTerminalApp(tk.Tk):
 
     def _configure_series_tree_columns(self) -> None:
         if self.betas_comparison_var.get():
-            self.series_tree.configure(columns=("symbol", "beta", "stderr", "tstat", "pvalue"))
-            for column, title, width in (
-                ("symbol", "Series", 68),
-                ("beta", "Beta", 54),
-                ("stderr", "SE", 52),
-                ("tstat", "t", 48),
-                ("pvalue", "p", 52),
-            ):
-                self.series_tree.heading(column, text=title)
-                self.series_tree.column(column, width=width)
+            self.series_tree.configure(columns=BETA_SERIES_COLUMNS, height=5)
+            for column in BETA_SERIES_COLUMNS:
+                self.series_tree.heading(
+                    column, text=BETA_SERIES_HEADINGS[column], anchor=tk.CENTER
+                )
+                self.series_tree.column(
+                    column,
+                    width=BETA_SERIES_MIN_COLUMN_WIDTH,
+                    minwidth=BETA_SERIES_MIN_COLUMN_WIDTH,
+                    anchor=tk.CENTER,
+                    stretch=False,
+                )
             self.beta_summary_label.pack(fill=tk.X, pady=(0, 5), before=self.series_tree)
             return
-        self.series_tree.configure(columns=("symbol", "name", "venue"))
+        self.series_tree.configure(columns=("symbol", "name", "venue"), height=8)
         for column, title, width in (
             ("symbol", "Symbol", 72),
             ("name", "Description", 128),
             ("venue", "Market", 75),
         ):
-            self.series_tree.heading(column, text=title)
-            self.series_tree.column(column, width=width)
+            self.series_tree.heading(column, text=title, anchor=tk.CENTER)
+            self.series_tree.column(
+                column,
+                width=width,
+                minwidth=WATCHLIST_MIN_COLUMN_WIDTH,
+                anchor=tk.W if column == "name" else tk.CENTER,
+                stretch=column == "name",
+            )
         self.beta_summary_label.pack_forget()
 
     def search_assets(self) -> None:
@@ -3265,6 +3402,10 @@ class MarketTerminalApp(tk.Tk):
         self.exchange_filter.configure(values=values)
         if self.exchange_filter_var.get() not in values:
             self.exchange_filter_var.set("All Markets")
+        self._render_search_results()
+
+    def _on_search_sort_changed(self, _event: tk.Event | None = None) -> None:
+        self._schedule_function_layout_save()
         self._render_search_results()
 
     def _render_search_results(self) -> None:
@@ -3364,6 +3505,10 @@ class MarketTerminalApp(tk.Tk):
             "Macro request failed",
         )
 
+    def _select_macro_category(self, _value: str | None = None) -> None:
+        self._populate_macro_placeholders()
+        self._schedule_function_layout_save()
+
     def refresh_event_calendar(self) -> None:
         if self.event_instrument is None:
             self.event_status_var.set("Search or select a grouped watchlist stock to load events.")
@@ -3408,11 +3553,20 @@ class MarketTerminalApp(tk.Tk):
         if request_id != self.event_request_id:
             return
         self.event_tree.delete(*self.event_tree.get_children())
-        for index, event in enumerate(events):
+        move_frame = (
+            self.current_frame
+            if self.selected_instrument is not None
+            and self.selected_instrument.symbol == instrument.symbol
+            else pd.DataFrame()
+        )
+        display_events = sorted(events, key=market_event_display_sort_key)
+        for index, event in enumerate(display_events):
             local_date, local_time = market_event_local_date_time(event)
             source_note = event.source
             if event.note:
                 source_note = f"{source_note}: {event.note}"
+            move_since = event_price_move_since_text(event, move_frame)
+            tags = (past_event_row_stripe(index),) if market_event_is_past(event) else (watchlist_row_stripe(index),)
             self.event_tree.insert(
                 "",
                 tk.END,
@@ -3421,10 +3575,12 @@ class MarketTerminalApp(tk.Tk):
                     local_date,
                     local_time,
                     event.event,
-                    event.event_type,
+                    event.prediction,
+                    event.actual,
+                    move_since,
                     source_note,
                 ),
-                tags=(watchlist_row_stripe(index),),
+                tags=tags,
             )
         if events:
             self.event_status_var.set(
@@ -3487,6 +3643,9 @@ class MarketTerminalApp(tk.Tk):
             lambda articles: self._update_news_feed(query.label, articles),
             "News request failed",
         )
+
+    def _select_news_topic(self, _value: str | None = None) -> None:
+        self._schedule_function_layout_save()
 
     def _update_news_feed(self, label: str, articles: tuple[NewsArticle, ...]) -> None:
         self.news_tree.delete(*self.news_tree.get_children())
@@ -3829,6 +3988,7 @@ class MarketTerminalApp(tk.Tk):
             return
         self._hide_suggestions()
         self.chart_instruments.append(instrument)
+        self.compare_search_var.set("")
         if len(self.chart_instruments) >= 2 and not self.betas_comparison_var.get():
             self.rebase_comparison_var.set(True)
             self.display_mode_var.set("Rebased 100")
@@ -3841,6 +4001,7 @@ class MarketTerminalApp(tk.Tk):
         else:
             self.add_to_compare_mode = False
             self.search_action_var.set("OPEN SECURITY")
+        self._schedule_function_layout_save()
         self.refresh_chart()
 
     def _open_instrument(self, instrument: Instrument) -> None:
@@ -3850,6 +4011,7 @@ class MarketTerminalApp(tk.Tk):
         self.betas_comparison_var.set(False)
         self.display_mode_var.set("Prices")
         self._update_series_tree()
+        self._schedule_function_layout_save()
         self.refresh_chart()
 
     def _update_series_tree(self) -> None:
@@ -3864,24 +4026,35 @@ class MarketTerminalApp(tk.Tk):
                 tk.END,
                 iid=str(position),
                 values=(instrument.symbol, instrument.name, instrument.exchange),
+                tags=(watchlist_row_stripe(position),),
             )
         self._update_compare_button_style()
 
     def _populate_beta_series_tree(self) -> None:
         if not self.chart_instruments:
             self.beta_summary_var.set("Open a primary series, then add X series.")
+            self._fit_beta_series_columns()
             return
         primary = self.chart_instruments[0]
         stats = self.beta_model_stats
         self.series_tree.insert(
-            "", tk.END, iid="0", values=(f"Y: {primary.symbol}", "", "", "", "")
+            "",
+            tk.END,
+            iid="0",
+            values=(f"Y: {primary.symbol}", "", "", "", ""),
+            tags=(watchlist_row_stripe(0),),
         )
         if not stats:
             self.beta_summary_var.set("Add X series and load enough aligned returns.")
             for position, instrument in enumerate(self.chart_instruments[1:], start=1):
                 self.series_tree.insert(
-                    "", tk.END, iid=str(position), values=(instrument.symbol, "-", "-", "-", "-")
+                    "",
+                    tk.END,
+                    iid=str(position),
+                    values=(instrument.symbol, "-", "-", "-", "-"),
+                    tags=(watchlist_row_stripe(position),),
                 )
+            self._fit_beta_series_columns()
             return
         alpha = stats.alpha
         self.beta_summary_var.set(
@@ -3900,7 +4073,31 @@ class MarketTerminalApp(tk.Tk):
                 f"{coefficient.t_stat:+.2f}" if coefficient else "-",
                 format_probability(coefficient.p_value) if coefficient else "-",
             )
-            self.series_tree.insert("", tk.END, iid=str(position), values=values)
+            self.series_tree.insert(
+                "",
+                tk.END,
+                iid=str(position),
+                values=values,
+                tags=(watchlist_row_stripe(position),),
+            )
+        self._fit_beta_series_columns()
+
+    def _fit_beta_series_columns(self) -> None:
+        if not self.betas_comparison_var.get():
+            return
+        rows = [
+            tuple(str(value) for value in self.series_tree.item(item, "values"))
+            for item in self.series_tree.get_children()
+        ]
+        width = beta_table_column_width(rows)
+        for column in BETA_SERIES_COLUMNS:
+            self.series_tree.column(
+                column,
+                width=width,
+                minwidth=BETA_SERIES_MIN_COLUMN_WIDTH,
+                anchor=tk.CENTER,
+                stretch=False,
+            )
 
     def _update_beta_model(self) -> None:
         if len(self.chart_instruments) < 2 or not self.current_frames:
@@ -3924,6 +4121,7 @@ class MarketTerminalApp(tk.Tk):
         self.selected_instrument = self.chart_instruments[0]
         self._update_series_tree()
         self._hide_compare_panel()
+        self._schedule_function_layout_save()
         self.refresh_chart()
 
     def _clear_chart_series(self) -> None:
@@ -3940,6 +4138,7 @@ class MarketTerminalApp(tk.Tk):
         self.session_var.set("")
         self.hours_var.set("")
         self.status_var.set("Chart series cleared.")
+        self._schedule_function_layout_save()
 
     def refresh_chart(self) -> None:
         if not self.chart_instruments:
@@ -4013,6 +4212,7 @@ class MarketTerminalApp(tk.Tk):
         self.selected_instrument = primary
         self.current_frames = visible_frames
         self.current_frame = visible_frames[primary.symbol]
+        self.current_series_colors = comparison_series_colors(instruments, visible_frames)
         if self.chart_group_var.get() == self.event_group_var.get():
             if self.event_instrument is None or self.event_instrument.symbol != primary.symbol:
                 self._open_event_calendar(primary)
@@ -4031,7 +4231,10 @@ class MarketTerminalApp(tk.Tk):
         plot_frames = displayed_close_series(visible_frames, self.display_mode_var.get())
         for position, instrument in enumerate(instruments):
             frame_for_symbol = visible_frames[instrument.symbol]
-            color = price_move_color(frame_for_symbol, SERIES_COLORS[position % len(SERIES_COLORS)])
+            color = self.current_series_colors.get(
+                instrument.symbol,
+                comparison_series_color(frame_for_symbol, position, len(instruments)),
+            )
             if position == 0 and len(instruments) == 1 and self.display_mode_var.get() == "Prices":
                 self._draw_primary_price_series(frame_for_symbol, instrument.symbol, color)
             else:
@@ -4057,7 +4260,10 @@ class MarketTerminalApp(tk.Tk):
         )
         self.fundamentals_var.set(instrument_fundamentals_text(primary))
         self._refresh_sec_context(primary)
-        ylabel = "Indexed (100)" if self.display_mode_var.get() == "Rebased 100" else "Price"
+        ylabel = comparison_y_axis_label(
+            [instrument.symbol for instrument in instruments],
+            self.display_mode_var.get(),
+        )
         self.price_axis.set_ylabel(ylabel, color=MUTED)
         self._draw_lower_panel(frame, primary.symbol)
         self.price_axis.legend(
@@ -4071,7 +4277,10 @@ class MarketTerminalApp(tk.Tk):
         self._configure_dates(range_spec)
         self._apply_full_date_bounds()
         self._apply_full_price_bounds()
-        self._draw_latest_value_markers(frame, self._selected_period_change_color(frame))
+        if len(instruments) > 1:
+            self._draw_comparison_latest_value_markers(plot_frames, self.current_series_colors)
+        else:
+            self._draw_latest_value_markers(frame, self._selected_period_change_color(frame))
         self._apply_chart_font()
         self.canvas.draw_idle()
         sources = sorted(
@@ -4411,6 +4620,46 @@ class MarketTerminalApp(tk.Tk):
             zorder=6,
         )
 
+    def _draw_comparison_latest_value_markers(
+        self, series: dict[str, pd.Series], colors: dict[str, str]
+    ) -> None:
+        for position, (symbol, closes) in enumerate(series.items()):
+            values = pd.to_numeric(closes, errors="coerce").dropna()
+            if values.empty:
+                continue
+            latest_value = float(values.iloc[-1])
+            color = colors.get(symbol, SERIES_COLORS[position % len(SERIES_COLORS)])
+            self.price_axis.axhline(
+                latest_value,
+                color=color,
+                linewidth=0.72,
+                linestyle="-",
+                alpha=0.45 if position else 0.62,
+                zorder=1,
+            )
+            self.price_axis.annotate(
+                comparison_latest_value_label(symbol, latest_value),
+                xy=(1.01, latest_value),
+                xycoords=("axes fraction", "data"),
+                xytext=(0, 0),
+                textcoords="offset points",
+                ha="left",
+                va="center",
+                color=BG,
+                fontsize=8,
+                fontweight="bold",
+                annotation_clip=False,
+                clip_on=False,
+                bbox={
+                    "boxstyle": "round,pad=0.22",
+                    "facecolor": color,
+                    "edgecolor": color,
+                    "linewidth": 0.0,
+                    "alpha": 0.95,
+                },
+                zorder=6 + position,
+            )
+
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
         if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):
             buys = frame["BuyCashEUR"].fillna(0)
@@ -4583,9 +4832,10 @@ class MarketTerminalApp(tk.Tk):
         self._draw_crosshair_hover(event.xdata, event.ydata)
 
     def _series_display_color(self, symbol: str, position: int) -> str:
-        fallback = SERIES_COLORS[position % len(SERIES_COLORS)]
+        if symbol in self.current_series_colors:
+            return self.current_series_colors[symbol]
         frame = self.current_frames.get(symbol)
-        return price_move_color(frame, fallback)
+        return comparison_series_color(frame, position, len(self.current_frames))
 
     def _draw_hover(self, timestamp: pd.Timestamp, values: list[tuple[str, float]]) -> None:
         self._clear_hover()
@@ -4936,6 +5186,7 @@ class MarketTerminalApp(tk.Tk):
     def _clear_chart(self, text: str) -> None:
         self.current_frame = pd.DataFrame()
         self.current_frames = {}
+        self.current_series_colors = {}
         self._clear_hover()
         self._clear_measurement()
         self.quote_var.set("")
@@ -5090,6 +5341,129 @@ def load_layout_state(path: Path) -> dict:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def normalized_app_settings(payload: object) -> dict:
+    settings = payload if isinstance(payload, dict) else {}
+    chart_mode = _choice(settings.get("chart_mode"), {"Intraday", "Historical"}, "Intraday")
+    selected_range = range_spec_from_state(settings.get("selected_range"), chart_mode)
+    technical_study = technical_study_from_state(settings.get("technical_study"))
+    chart_instruments = [
+        instrument
+        for instrument in (
+            instrument_from_watchlist_row(row)
+            for row in settings.get("chart_instruments", [])
+            if isinstance(row, dict)
+        )
+        if instrument is not None
+    ]
+    has_comparison = len(chart_instruments) >= 2
+    display_mode = _choice(settings.get("display_mode"), {"Prices", "Rebased 100"}, "Prices")
+    return {
+        "chart_mode": chart_mode,
+        "selected_range": selected_range,
+        "price_render_mode": _choice(
+            settings.get("price_render_mode"), set(PRICE_RENDER_MODES), "bars"
+        ),
+        "display_mode": display_mode if has_comparison else "Prices",
+        "compare_panel_visible": bool(settings.get("compare_panel_visible", False)) and has_comparison,
+        "rebase_comparison": bool(settings.get("rebase_comparison", False)) and has_comparison,
+        "betas_comparison": bool(settings.get("betas_comparison", False)) and has_comparison,
+        "technical_study": technical_study,
+        "extended_hours": bool(settings.get("extended_hours", False)),
+        "intraday_custom_bar": _choice(
+            settings.get("intraday_custom_bar"),
+            {"1m", "5m", "15m", "30m", "60m"},
+            "15m",
+        ),
+        "chart_group": _choice(settings.get("chart_group"), set("ABCDEF"), "A"),
+        "watchlist_group": _choice(settings.get("watchlist_group"), set("ABCDEF"), "A"),
+        "event_group": _choice(settings.get("event_group"), set("ABCDEF"), "A"),
+        "macro_category": _choice(
+            settings.get("macro_category"),
+            {"rates", "inflation", "labor", "growth", "money", "credit"},
+            "rates",
+        ),
+        "news_topic": _choice(
+            settings.get("news_topic"),
+            {query.label for query in default_news_queries()},
+            "Markets",
+        ),
+        "search_sort": _choice(
+            settings.get("search_sort"),
+            {"Relevance", "Market Cap", "Exchange"},
+            "Relevance",
+        ),
+        "chart_instruments": chart_instruments[:MAX_SERIES],
+    }
+
+
+def _choice(value: object, choices: set[str], default: str) -> str:
+    return value if isinstance(value, str) and value in choices else default
+
+
+def range_spec_state(range_spec: RangeSpec) -> dict:
+    return {
+        "label": range_spec.label,
+        "period": range_spec.period,
+        "interval": range_spec.interval,
+        "start": range_spec.start,
+        "end": range_spec.end,
+    }
+
+
+def range_spec_from_state(payload: object, chart_mode: str) -> RangeSpec:
+    ranges = INTRADAY_RANGES if chart_mode == "Intraday" else HISTORICAL_RANGES
+    default = ranges[0]
+    if not isinstance(payload, dict):
+        return default
+    period = str(payload.get("period", "") or "")
+    interval = str(payload.get("interval", "") or "")
+    start = payload.get("start")
+    end = payload.get("end")
+    if period == "custom" and isinstance(start, str) and isinstance(end, str):
+        try:
+            return custom_range_spec(chart_mode, start, end, interval)
+        except ValueError:
+            return default
+    for range_spec in ranges:
+        if range_spec.period == period and range_spec.interval == interval:
+            return range_spec
+    label = str(payload.get("label", "") or "")
+    for range_spec in ranges:
+        if range_spec.label == label:
+            return range_spec
+    return default
+
+
+def technical_study_state(study: tuple[str, int] | None) -> dict | None:
+    if study is None:
+        return None
+    return {"name": study[0], "period": study[1]}
+
+
+def technical_study_from_state(payload: object) -> tuple[str, int] | None:
+    if payload in (None, "", {}, []):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = str(payload.get("name", "") or "").upper()
+    try:
+        period = int(payload.get("period"))
+    except (TypeError, ValueError):
+        return None
+    valid_periods = {
+        ("RSI", 7),
+        ("RSI", 14),
+        ("RSI", 21),
+        ("MOM", 5),
+        ("MOM", 10),
+        ("MOM", 20),
+        ("SIGMA", 10),
+        ("SIGMA", 20),
+        ("SIGMA", 60),
+    }
+    return (name, period) if (name, period) in valid_periods else None
 
 
 def save_layout_state(path: Path, layout: dict) -> None:
@@ -5556,6 +5930,59 @@ def market_event_local_date_time(event: MarketEvent) -> tuple[str, str]:
     return date_text, time_text
 
 
+def event_price_move_since_text(event: MarketEvent, frame: pd.DataFrame) -> str:
+    if event.timestamp is None or frame.empty or "Close" not in frame:
+        return ""
+    closes = pd.to_numeric(frame["Close"], errors="coerce").dropna()
+    if len(closes) < 2:
+        return ""
+    event_time = pd.Timestamp(event.timestamp)
+    index = closes.index
+    if getattr(index, "tz", None) is not None:
+        if event_time.tzinfo is None:
+            event_time = event_time.tz_localize(index.tz)
+        else:
+            event_time = event_time.tz_convert(index.tz)
+    elif event_time.tzinfo is not None:
+        event_time = event_time.tz_convert("UTC").tz_localize(None)
+    if event.is_date_only:
+        event_time = event_time.normalize()
+    positions = index.searchsorted(event_time, side="left")
+    if positions >= len(closes):
+        return ""
+    start = float(closes.iloc[int(positions)])
+    latest = float(closes.iloc[-1])
+    if start == 0:
+        return ""
+    percent = (latest - start) / start * 100
+    return f"{percent:+.2f}%"
+
+
+def market_event_display_sort_key(event: MarketEvent) -> tuple[int, pd.Timestamp, str]:
+    if event.timestamp is None:
+        return (1, pd.Timestamp.max, event.event)
+    timestamp = pd.Timestamp(event.timestamp)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+    return (0, timestamp, event.event)
+
+
+def market_event_is_past(event: MarketEvent, now: datetime | None = None) -> bool:
+    if event.timestamp is None:
+        return False
+    current = pd.Timestamp(now or datetime.now(timezone.utc))
+    timestamp = pd.Timestamp(event.timestamp)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    if current.tzinfo is None:
+        current = current.tz_localize("UTC")
+    return timestamp < current
+
+
+def past_event_row_stripe(row_index: int) -> str:
+    return "past_even" if row_index % 2 == 0 else "past_odd"
+
+
 def format_bid_ask_value(value: float | None, quote, side: str) -> str:
     if value is not None:
         return format_quote_value(value)
@@ -5618,6 +6045,15 @@ def normalized_watchlist_column_widths(widths: object) -> dict[str, int]:
         if width >= WATCHLIST_MIN_COLUMN_WIDTH:
             normalized[column] = width
     return normalized
+
+
+def beta_table_column_width(rows: list[tuple[str, ...]]) -> int:
+    values = list(BETA_SERIES_HEADINGS.values())
+    for row in rows:
+        values.extend(str(value) for value in row)
+    longest = max((len(value) for value in values), default=0)
+    width = longest * 7 + 18
+    return max(BETA_SERIES_MIN_COLUMN_WIDTH, min(width, BETA_SERIES_MAX_COLUMN_WIDTH))
 
 
 def watchlist_heading_height(tree, fallback: int = 25) -> int:
@@ -5741,6 +6177,40 @@ def displayed_close_series(
     return {
         symbol: series / float(series.iloc[0]) * 100 if float(series.iloc[0]) else series * 0
         for symbol, series in closes.items()
+    }
+
+
+def comparison_y_axis_label(symbols: list[str], display_mode: str) -> str:
+    prefix = "Indexed (100)" if display_mode == "Rebased 100" else "Price"
+    if len(symbols) < 2:
+        return prefix
+    return f"{prefix}: {', '.join(symbols)}"
+
+
+def comparison_latest_value_label(symbol: str, value: float) -> str:
+    return f"{symbol} {format_quote_value(value)}"
+
+
+def comparison_series_color(
+    frame: pd.DataFrame | None, position: int, series_count: int
+) -> str:
+    fallback = SERIES_COLORS[position % len(SERIES_COLORS)]
+    if series_count > 1:
+        return fallback
+    return price_move_color(frame, fallback)
+
+
+def comparison_series_colors(
+    instruments: list[Instrument], frames: dict[str, pd.DataFrame]
+) -> dict[str, str]:
+    series_count = len(instruments)
+    return {
+        instrument.symbol: comparison_series_color(
+            frames.get(instrument.symbol),
+            position,
+            series_count,
+        )
+        for position, instrument in enumerate(instruments)
     }
 
 

@@ -124,6 +124,16 @@ IMPLEMENTED_PROVIDER_SPECS = (
         implemented=True,
         notes="Free global news discovery source; requires ranking/noise filtering for finance workflows.",
     ),
+    ProviderSpec(
+        provider_id="nfin",
+        name="nfin Nasdaq API",
+        features=("earnings_calendar", "ipo_calendar", "dividends", "splits"),
+        asset_classes=("us_equities",),
+        docs_url="https://nfin.dev/",
+        implemented=True,
+        credential_env="NFIN_API_KEY",
+        notes="No-key Nasdaq calendar enrichment source; anonymous access is usable but IP-rate-limited.",
+    ),
 )
 
 
@@ -136,6 +146,74 @@ PLANNED_PROVIDER_SPECS = (
         docs_url="https://data.ecb.europa.eu/help/api/overview",
         implemented=False,
         notes="Planned euro-area SDMX macro/rates integration.",
+    ),
+    ProviderSpec(
+        provider_id="nasdaq_calendar",
+        name="NASDAQ public calendars",
+        features=("earnings_calendar", "ipo_calendar", "dividends", "splits"),
+        asset_classes=("us_equities",),
+        docs_url="https://github.com/s-kerin/finance_calendars",
+        implemented=False,
+        notes="Candidate event-calendar source via public NASDAQ endpoints/wrappers; reverse-engineered access must stay best-effort and clearly attributed.",
+    ),
+    ProviderSpec(
+        provider_id="finnhub",
+        name="Finnhub",
+        features=("earnings_calendar", "company_news", "fundamentals"),
+        asset_classes=("equities", "news"),
+        docs_url="https://finnhub.io/docs/api",
+        implemented=False,
+        credential_env="FINNHUB_API_KEY",
+        notes="Free API key advertised; endpoint availability and terms need validation before enabling by default.",
+    ),
+    ProviderSpec(
+        provider_id="fmp",
+        name="Financial Modeling Prep",
+        features=("earnings_calendar", "ipo_calendar", "dividends", "splits", "press_releases"),
+        asset_classes=("equities", "news"),
+        docs_url="https://site.financialmodelingprep.com/developer/docs",
+        implemented=False,
+        credential_env="FMP_API_KEY",
+        notes="Broad calendar API surface; free tier and redistribution limits need validation before production use.",
+    ),
+    ProviderSpec(
+        provider_id="eodhd",
+        name="EODHD",
+        features=("earnings_calendar", "ipo_calendar", "dividends", "splits", "eod_history"),
+        asset_classes=("equities",),
+        docs_url="https://eodhd.com/financial-apis/",
+        implemented=False,
+        credential_env="EODHD_API_KEY",
+        notes="Calendar endpoints and free starter exist, but the free plan is very low quota and personal-use oriented.",
+    ),
+    ProviderSpec(
+        provider_id="stockdata",
+        name="StockData.org",
+        features=("stock_quotes", "news", "dividends", "splits"),
+        asset_classes=("us_equities", "news"),
+        docs_url="https://www.stockdata.org/documentation",
+        implemented=False,
+        credential_env="STOCKDATA_API_KEY",
+        notes="Candidate for quotes/news; dividends and splits are documented as Standard-plan endpoints, so not a first-choice free event source.",
+    ),
+    ProviderSpec(
+        provider_id="marketstack",
+        name="Marketstack",
+        features=("eod_history", "dividends", "splits"),
+        asset_classes=("equities",),
+        docs_url="https://docs.apilayer.com/marketstack/docs/api-endpoints-v1/",
+        implemented=False,
+        credential_env="MARKETSTACK_API_KEY",
+        notes="Free EOD-oriented API candidate; event-calendar value appears limited to dividend/split fields and quotas need validation.",
+    ),
+    ProviderSpec(
+        provider_id="exchange_calendars",
+        name="exchange_calendars / pandas_market_calendars",
+        features=("market_holidays", "early_closes", "trading_sessions"),
+        asset_classes=("exchange_schedules",),
+        docs_url="https://pypi.org/project/exchange-calendars/",
+        implemented=False,
+        notes="Candidate for market holidays and session schedules, not company-specific earnings/dividend events.",
     ),
 )
 
@@ -197,6 +275,16 @@ def _provider_health(spec: ProviderSpec) -> ProviderHealth:
             spec,
             STATUS_LIMITED,
             "Using public CSV fallback; set FRED_API_KEY for the official JSON API.",
+        )
+    if spec.provider_id == "nfin":
+        if os.getenv("NFIN_DISABLE", "0") == "1":
+            return ProviderHealth(spec, STATUS_LIMITED, "Disabled by NFIN_DISABLE=1.")
+        if _has_env_value(spec.credential_env):
+            return ProviderHealth(spec, STATUS_READY, f"{spec.credential_env} is configured.")
+        return ProviderHealth(
+            spec,
+            STATUS_LIMITED,
+            "Anonymous no-key access is active; set NFIN_API_KEY for higher limits.",
         )
     if spec.credential_env and not _has_env_value(spec.credential_env):
         return ProviderHealth(spec, STATUS_MISSING_KEY, f"Set {spec.credential_env} to enable.")

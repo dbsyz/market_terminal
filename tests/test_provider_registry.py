@@ -26,8 +26,12 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertIn("sec_edgar", [spec.provider_id for spec in specs])
         self.assertIn("fred", [spec.provider_id for spec in specs])
         self.assertIn("gdelt", [spec.provider_id for spec in specs])
+        self.assertIn("nasdaq_calendar", [spec.provider_id for spec in specs])
+        self.assertIn("nfin", [spec.provider_id for spec in specs])
+        self.assertIn("exchange_calendars", [spec.provider_id for spec in specs])
         self.assertTrue(next(spec for spec in specs if spec.provider_id == "sec_edgar").implemented)
         self.assertTrue(next(spec for spec in specs if spec.provider_id == "gdelt").implemented)
+        self.assertTrue(next(spec for spec in specs if spec.provider_id == "nfin").implemented)
 
     def test_marks_keyless_openfigi_as_limited_not_disabled(self) -> None:
         with patch.dict(os.environ, {"OPENFIGI_API_KEY": ""}, clear=False):
@@ -64,10 +68,24 @@ class ProviderRegistryTests(unittest.TestCase):
 
         self.assertEqual(health["sec_edgar"].status, STATUS_LIMITED)
 
+    def test_marks_nfin_as_limited_without_optional_key(self) -> None:
+        with patch.dict(os.environ, {"NFIN_API_KEY": "", "NFIN_DISABLE": "0"}, clear=False):
+            health = _health_by_id()
+
+        self.assertEqual(health["nfin"].status, STATUS_LIMITED)
+        self.assertTrue(health["nfin"].configured)
+
     def test_marks_planned_sources_as_planned(self) -> None:
         health = _health_by_id()
 
         self.assertEqual(health["ecb"].status, STATUS_PLANNED)
+        self.assertEqual(health["nasdaq_calendar"].status, STATUS_PLANNED)
+        self.assertEqual(health["finnhub"].status, STATUS_PLANNED)
+        self.assertEqual(health["fmp"].status, STATUS_PLANNED)
+        self.assertEqual(health["eodhd"].status, STATUS_PLANNED)
+        self.assertEqual(health["stockdata"].status, STATUS_PLANNED)
+        self.assertEqual(health["marketstack"].status, STATUS_PLANNED)
+        self.assertEqual(health["exchange_calendars"].status, STATUS_PLANNED)
 
     def test_summary_is_human_readable(self) -> None:
         summary = provider_health_summary(include_planned=False)
