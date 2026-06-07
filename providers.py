@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
-from time import monotonic
+from threading import Lock
+from time import monotonic, sleep
 
 import pandas as pd
 import requests
 import yfinance as yf
 import yfinance.cache as yf_cache
 
-from .models import Instrument, MarketSession, QuoteSnapshot, RangeSpec
+from .models import Instrument, MarketEvent, MarketSession, QuoteSnapshot, RangeSpec
 from .portfolio_index import (
     PORTFOLIO_INDEX_SYMBOL,
     load_portfolio_index_history,
@@ -438,7 +439,13 @@ class BinanceSpotClient:
 
 
 class MarketDataProvider:
+    history_ttl_seconds = 120.0
+    instrument_details_ttl_seconds = 86400.0
+    market_events_ttl_seconds = 3600.0
+    market_session_ttl_seconds = 300.0
     quote_info_ttl_seconds = 60.0
+    quote_snapshot_ttl_seconds = 20.0
+    yahoo_min_request_interval_seconds = 0.75
 
     def __init__(
         self,
@@ -452,7 +459,14 @@ class MarketDataProvider:
         self.twelve = twelve or TwelveDataClient()
         self.stooq = stooq or StooqClient()
         self.binance = binance or BinanceSpotClient()
+        self._yahoo_lock = Lock()
+        self._last_yahoo_request_at = 0.0
+        self._history_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
+        self._instrument_details_cache: dict[str, tuple[float, Instrument]] = {}
+        self._market_events_cache: dict[tuple[str, int], tuple[float, list[MarketEvent]]] = {}
+        self._market_session_cache: dict[str, tuple[float, MarketSession]] = {}
         self._quote_info_cache: dict[str, tuple[float, dict]] = {}
+        self._quote_snapshot_cache: dict[tuple[str, bool], tuple[float, QuoteSnapshot]] = {}
 
     def search(self, query: str) -> list[Instrument]:
         query = query.strip()
@@ -520,10 +534,15 @@ class MarketDataProvider:
         return _unique_instruments(instruments)
 
     def instrument_details(self, instrument: Instrument) -> Instrument:
+        cached = self._cached_instrument_details(instrument)
+        if cached is not None:
+            return cached
         market_cap = instrument.market_cap
         aum = instrument.aum
         try:
-            info = yf.Ticker(instrument.symbol).info or {}
+            ticker = yf.Ticker(instrument.symbol)
+            self._pace_yahoo()
+            info = ticker.info or {}
         except Exception:
             info = {}
         if market_cap is None:
@@ -536,16 +555,48 @@ class MarketDataProvider:
                 or info.get("fundTotalAssets")
             )
         if instrument.isin:
-            return replace(instrument, market_cap=market_cap, aum=aum)
+            result = replace(instrument, market_cap=market_cap, aum=aum)
+            self._store_instrument_details(instrument, result)
+            return result
         try:
-            isin = str(yf.Ticker(instrument.symbol).get_isin() or "").strip()
+            ticker = yf.Ticker(instrument.symbol)
+            self._pace_yahoo()
+            isin = str(ticker.get_isin() or "").strip()
         except Exception:
             isin = ""
         if not isin or isin == "-":
             isin = _lookup_isin_by_euronext_listing(instrument.symbol)
-        return replace(instrument, isin=isin, market_cap=market_cap, aum=aum)
+        result = replace(instrument, isin=isin, market_cap=market_cap, aum=aum)
+        self._store_instrument_details(instrument, result)
+        return result
+
+    def market_events(self, instrument: Instrument, limit: int = 16) -> list[MarketEvent]:
+        cached = self._cached_market_events(instrument, limit)
+        if cached is not None:
+            return cached
+        if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
+            return []
+        binance = getattr(self, "binance", None)
+        if binance is not None and binance_symbol_from_instrument(instrument):
+            return []
+        ticker = yf.Ticker(instrument.symbol)
+        events: list[MarketEvent] = []
+        try:
+            self._pace_yahoo()
+            events.extend(_events_from_yahoo_calendar(ticker.get_calendar()))
+        except Exception:
+            pass
+        try:
+            self._pace_yahoo()
+            events.extend(_events_from_yahoo_earnings_dates(ticker.get_earnings_dates(limit=limit)))
+        except Exception:
+            pass
+        result = _unique_market_events(events)[:limit]
+        self._store_market_events(instrument, limit, result)
+        return result
 
     def _search_yahoo(self, query: str) -> list[Instrument]:
+        self._pace_yahoo()
         search = yf.Search(
             query,
             max_results=12,
@@ -594,6 +645,9 @@ class MarketDataProvider:
     ) -> pd.DataFrame:
         if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
             return load_portfolio_index_history(range_spec)
+        cached = self._cached_history(instrument, range_spec, include_extended_hours)
+        if cached is not None:
+            return cached
         attempts = [self._history_yahoo]
         binance = getattr(self, "binance", None)
         if binance is not None and binance.enabled and binance_symbol_from_instrument(instrument):
@@ -622,6 +676,7 @@ class MarketDataProvider:
             selected.attrs["quality_candidates"] = tuple(
                 quality for _frame, quality in candidates
             )
+            self._store_history(instrument, range_spec, include_extended_hours, selected)
             return selected
         if candidates:
             diagnostics = " | ".join(_quality_summary(quality) for _frame, quality in candidates)
@@ -652,7 +707,9 @@ class MarketDataProvider:
             )
         else:
             request["period"] = range_spec.period
-        frame = yf.Ticker(instrument.symbol).history(**request)
+        ticker = yf.Ticker(instrument.symbol)
+        self._pace_yahoo()
+        frame = ticker.history(**request)
         if frame.empty:
             return frame
         required_columns = ["Open", "High", "Low", "Close", "Volume"]
@@ -662,6 +719,9 @@ class MarketDataProvider:
         return result
 
     def market_session(self, instrument: Instrument) -> MarketSession:
+        cached = self._cached_market_session(instrument)
+        if cached is not None:
+            return cached
         if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
             return portfolio_market_session()
         binance = getattr(self, "binance", None)
@@ -674,10 +734,17 @@ class MarketDataProvider:
                 extended_session="Not applicable",
                 overnight_session="Trades continuously",
             )
-        metadata = yf.Ticker(instrument.symbol).get_history_metadata()
-        return build_market_session(metadata)
+        ticker = yf.Ticker(instrument.symbol)
+        self._pace_yahoo()
+        metadata = ticker.get_history_metadata()
+        session = build_market_session(metadata)
+        self._store_market_session(instrument, session)
+        return session
 
     def quote_snapshot(self, instrument: Instrument, include_slow_info: bool = True) -> QuoteSnapshot:
+        cached = self._cached_quote_snapshot(instrument, include_slow_info)
+        if cached is not None:
+            return cached
         if instrument.symbol.upper() == PORTFOLIO_INDEX_SYMBOL:
             frame = load_portfolio_index_history(RangeSpec("MAX", "max", "1d"))
             last = float(frame["Close"].iloc[-1]) if not frame.empty else None
@@ -693,21 +760,26 @@ class MarketDataProvider:
                 if not frame.empty and "Volume" in frame.columns
                 else None
             )
-            return QuoteSnapshot(
+            quote = QuoteSnapshot(
                 last=last,
                 change=change,
                 change_percent=change_percent,
                 volume=volume,
                 market_state="LOCAL INDEX",
             )
+            self._store_quote_snapshot(instrument, include_slow_info, quote)
+            return quote
         binance = getattr(self, "binance", None)
         if binance is not None and binance.enabled and binance_symbol_from_instrument(instrument):
             try:
-                return binance.quote_snapshot(instrument)
+                quote = binance.quote_snapshot(instrument)
+                self._store_quote_snapshot(instrument, include_slow_info, quote)
+                return quote
             except Exception:
                 pass
         ticker = yf.Ticker(instrument.symbol)
         try:
+            self._pace_yahoo()
             fast = dict(ticker.fast_info or {})
         except Exception:
             fast = {}
@@ -745,7 +817,7 @@ class MarketDataProvider:
             change = last - previous_close
         if change_percent is None and change is not None and previous_close not in (None, 0):
             change_percent = change / previous_close * 100
-        return QuoteSnapshot(
+        quote = QuoteSnapshot(
             last=last,
             bid=_first_optional_float(fast, info, ("bid", "bidPrice")),
             ask=_first_optional_float(fast, info, ("ask", "askPrice")),
@@ -762,6 +834,150 @@ class MarketDataProvider:
                 ("market_state", "marketState"),
             ),
         )
+        self._store_quote_snapshot(instrument, include_slow_info, quote)
+        return quote
+
+    def _pace_yahoo(self) -> None:
+        lock = getattr(self, "_yahoo_lock", None)
+        if lock is None:
+            self._yahoo_lock = Lock()
+            lock = self._yahoo_lock
+        with lock:
+            now = monotonic()
+            wait_seconds = self.yahoo_min_request_interval_seconds - (
+                now - getattr(self, "_last_yahoo_request_at", 0.0)
+            )
+            if wait_seconds > 0:
+                sleep(wait_seconds)
+            self._last_yahoo_request_at = monotonic()
+
+    def _history_cache_key(
+        self,
+        instrument: Instrument,
+        range_spec: RangeSpec,
+        include_extended_hours: bool,
+    ) -> tuple:
+        return (
+            instrument.symbol.upper(),
+            range_spec.label,
+            range_spec.period,
+            range_spec.interval,
+            range_spec.start,
+            range_spec.end,
+            include_extended_hours,
+        )
+
+    def _copy_history_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        copied = frame.copy()
+        copied.attrs.update(frame.attrs)
+        return copied
+
+    def _cached_history(
+        self,
+        instrument: Instrument,
+        range_spec: RangeSpec,
+        include_extended_hours: bool,
+    ) -> pd.DataFrame | None:
+        cache = getattr(self, "_history_cache", None)
+        if cache is None:
+            cache = {}
+            self._history_cache = cache
+        cached = cache.get(self._history_cache_key(instrument, range_spec, include_extended_hours))
+        if cached and monotonic() - cached[0] < self.history_ttl_seconds:
+            return self._copy_history_frame(cached[1])
+        return None
+
+    def _store_history(
+        self,
+        instrument: Instrument,
+        range_spec: RangeSpec,
+        include_extended_hours: bool,
+        frame: pd.DataFrame,
+    ) -> None:
+        cache = getattr(self, "_history_cache", None)
+        if cache is None:
+            cache = {}
+            self._history_cache = cache
+        cache[self._history_cache_key(instrument, range_spec, include_extended_hours)] = (
+            monotonic(),
+            self._copy_history_frame(frame),
+        )
+
+    def _cached_instrument_details(self, instrument: Instrument) -> Instrument | None:
+        cache = getattr(self, "_instrument_details_cache", None)
+        if cache is None:
+            cache = {}
+            self._instrument_details_cache = cache
+        cached = cache.get(instrument.symbol.upper())
+        if cached and monotonic() - cached[0] < self.instrument_details_ttl_seconds:
+            return cached[1]
+        return None
+
+    def _store_instrument_details(self, instrument: Instrument, details: Instrument) -> None:
+        cache = getattr(self, "_instrument_details_cache", None)
+        if cache is None:
+            cache = {}
+            self._instrument_details_cache = cache
+        cache[instrument.symbol.upper()] = (monotonic(), details)
+
+    def _cached_market_events(
+        self, instrument: Instrument, limit: int
+    ) -> list[MarketEvent] | None:
+        cache = getattr(self, "_market_events_cache", None)
+        if cache is None:
+            cache = {}
+            self._market_events_cache = cache
+        cached = cache.get((instrument.symbol.upper(), limit))
+        if cached and monotonic() - cached[0] < self.market_events_ttl_seconds:
+            return list(cached[1])
+        return None
+
+    def _store_market_events(
+        self, instrument: Instrument, limit: int, events: list[MarketEvent]
+    ) -> None:
+        cache = getattr(self, "_market_events_cache", None)
+        if cache is None:
+            cache = {}
+            self._market_events_cache = cache
+        cache[(instrument.symbol.upper(), limit)] = (monotonic(), list(events))
+
+    def _cached_market_session(self, instrument: Instrument) -> MarketSession | None:
+        cache = getattr(self, "_market_session_cache", None)
+        if cache is None:
+            cache = {}
+            self._market_session_cache = cache
+        cached = cache.get(instrument.symbol.upper())
+        if cached and monotonic() - cached[0] < self.market_session_ttl_seconds:
+            return cached[1]
+        return None
+
+    def _store_market_session(self, instrument: Instrument, session: MarketSession) -> None:
+        cache = getattr(self, "_market_session_cache", None)
+        if cache is None:
+            cache = {}
+            self._market_session_cache = cache
+        cache[instrument.symbol.upper()] = (monotonic(), session)
+
+    def _cached_quote_snapshot(
+        self, instrument: Instrument, include_slow_info: bool
+    ) -> QuoteSnapshot | None:
+        cache = getattr(self, "_quote_snapshot_cache", None)
+        if cache is None:
+            cache = {}
+            self._quote_snapshot_cache = cache
+        cached = cache.get((instrument.symbol.upper(), include_slow_info))
+        if cached and monotonic() - cached[0] < self.quote_snapshot_ttl_seconds:
+            return cached[1]
+        return None
+
+    def _store_quote_snapshot(
+        self, instrument: Instrument, include_slow_info: bool, quote: QuoteSnapshot
+    ) -> None:
+        cache = getattr(self, "_quote_snapshot_cache", None)
+        if cache is None:
+            cache = {}
+            self._quote_snapshot_cache = cache
+        cache[(instrument.symbol.upper(), include_slow_info)] = (monotonic(), quote)
 
     def _quote_info(self, symbol: str, ticker, include_slow_info: bool) -> dict:
         cache = getattr(self, "_quote_info_cache", None)
@@ -776,6 +992,7 @@ class MarketDataProvider:
         if not include_slow_info:
             return cached[1] if cached else {}
         try:
+            self._pace_yahoo()
             info = ticker.info or {}
         except Exception:
             info = cached[1] if cached else {}
@@ -788,6 +1005,128 @@ def _unique_instruments(instruments: list[Instrument]) -> list[Instrument]:
     for instrument in instruments:
         unique.setdefault(instrument.symbol, instrument)
     return list(unique.values())
+
+
+def _unique_market_events(events: list[MarketEvent]) -> list[MarketEvent]:
+    unique: dict[tuple[str, str, str], MarketEvent] = {}
+    for event in sorted(events, key=_market_event_sort_key):
+        if not event.event:
+            continue
+        timestamp_key = event.timestamp.isoformat() if event.timestamp else ""
+        key = (timestamp_key, event.event_type.upper(), event.event.upper())
+        unique.setdefault(key, event)
+    return list(unique.values())
+
+
+def _market_event_sort_key(event: MarketEvent) -> tuple[int, datetime, str]:
+    timestamp = event.timestamp or datetime.max.replace(tzinfo=timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return (0 if event.timestamp else 1, timestamp, event.event)
+
+
+def _events_from_yahoo_calendar(calendar: object) -> list[MarketEvent]:
+    if not isinstance(calendar, dict):
+        return []
+    events: list[MarketEvent] = []
+    for key, value in calendar.items():
+        event_type = _calendar_event_type(str(key))
+        if not event_type:
+            continue
+        for timestamp, is_date_only in _calendar_timestamps(value):
+            events.append(
+                MarketEvent(
+                    timestamp=timestamp,
+                    event=_calendar_event_name(str(key)),
+                    event_type=event_type,
+                    source="Yahoo Finance calendar",
+                    note="Best-effort public Yahoo calendar field",
+                    is_date_only=is_date_only,
+                )
+            )
+    return events
+
+
+def _events_from_yahoo_earnings_dates(frame: object) -> list[MarketEvent]:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    events: list[MarketEvent] = []
+    for index, row in frame.iterrows():
+        timestamp, is_date_only = _event_timestamp(index)
+        if timestamp is None:
+            continue
+        note_parts = []
+        for label, column in (
+            ("EPS est", "EPS Estimate"),
+            ("EPS actual", "Reported EPS"),
+            ("Surprise", "Surprise(%)"),
+        ):
+            value = row.get(column) if hasattr(row, "get") else None
+            parsed = _as_optional_float(value)
+            if parsed is not None:
+                note_parts.append(f"{label} {parsed:g}")
+        events.append(
+            MarketEvent(
+                timestamp=timestamp,
+                event="Earnings",
+                event_type="Earnings",
+                source="Yahoo Finance earnings dates",
+                note=" | ".join(note_parts) or "Best-effort public Yahoo earnings date",
+                is_date_only=is_date_only,
+            )
+        )
+    return events
+
+
+def _calendar_event_type(key: str) -> str:
+    normalized = key.strip().lower()
+    if "earnings" in normalized and "date" in normalized:
+        return "Earnings"
+    if "ex-dividend" in normalized or "dividend date" in normalized:
+        return "Dividend"
+    if "split" in normalized and "date" in normalized:
+        return "Split"
+    return ""
+
+
+def _calendar_event_name(key: str) -> str:
+    normalized = key.strip()
+    names = {
+        "Earnings Date": "Earnings",
+        "Ex-Dividend Date": "Ex-dividend",
+        "Dividend Date": "Dividend payable",
+        "Split Date": "Split",
+    }
+    return names.get(normalized, normalized)
+
+
+def _calendar_timestamps(value: object) -> list[tuple[datetime, bool]]:
+    if isinstance(value, (list, tuple, set, pd.Series, pd.Index)):
+        timestamps = []
+        for item in value:
+            timestamp, is_date_only = _event_timestamp(item)
+            if timestamp is not None:
+                timestamps.append((timestamp, is_date_only))
+        return timestamps
+    timestamp, is_date_only = _event_timestamp(value)
+    return [(timestamp, is_date_only)] if timestamp is not None else []
+
+
+def _event_timestamp(value: object) -> tuple[datetime | None, bool]:
+    if value in (None, "", "-"):
+        return None, False
+    try:
+        timestamp = pd.Timestamp(value)
+    except Exception:
+        return None, False
+    if pd.isna(timestamp):
+        return None, False
+    is_date_only = timestamp.hour == 0 and timestamp.minute == 0 and timestamp.second == 0
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    return timestamp.to_pydatetime(), is_date_only
 
 
 def _prioritize_symbol(instruments: list[Instrument], symbol: str) -> list[Instrument]:

@@ -556,6 +556,34 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(quote.change, 1.5)
         self.assertEqual(quote.change_percent, 1.5)
 
+    def test_quote_snapshot_uses_short_lived_cache(self) -> None:
+        calls = 0
+
+        class TickerStub:
+            @property
+            def fast_info(self):
+                nonlocal calls
+                calls += 1
+                return {"last_price": 101.5, "previous_close": 100.0}
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            provider.binance = None
+            provider._quote_info_cache = {}
+            provider._quote_snapshot_cache = {}
+            first = provider.quote_snapshot(Instrument("AAPL", "Apple"), include_slow_info=False)
+            second = provider.quote_snapshot(Instrument("AAPL", "Apple"), include_slow_info=False)
+        finally:
+            providers.yf.Ticker = original_ticker
+
+        self.assertEqual(first.last, 101.5)
+        self.assertEqual(second.last, 101.5)
+        self.assertEqual(calls, 1)
+
     def test_selected_yahoo_asset_is_enriched_with_isin(self) -> None:
         class TickerStub:
             info = {}
@@ -597,6 +625,37 @@ class MarketDataProviderTests(unittest.TestCase):
 
         self.assertEqual(enriched.market_cap, 123_000_000_000)
         self.assertEqual(enriched.aum, 456_000_000_000)
+
+    def test_market_events_normalizes_yahoo_calendar_and_earnings_dates(self) -> None:
+        class TickerStub:
+            def get_calendar(self):
+                return {
+                    "Earnings Date": [pd.Timestamp("2026-07-25 12:30", tz="UTC")],
+                    "Ex-Dividend Date": pd.Timestamp("2026-08-01"),
+                }
+
+            def get_earnings_dates(self, limit=16):
+                return pd.DataFrame(
+                    {"EPS Estimate": [1.25]},
+                    index=pd.DatetimeIndex([pd.Timestamp("2026-07-25 12:30", tz="UTC")]),
+                )
+
+        import market_terminal.providers as providers
+
+        original_ticker = providers.yf.Ticker
+        providers.yf.Ticker = lambda _symbol: TickerStub()
+        try:
+            provider = MarketDataProvider.__new__(MarketDataProvider)
+            provider.binance = None
+            events = provider.market_events(Instrument("AAPL", "Apple"))
+        finally:
+            providers.yf.Ticker = original_ticker
+
+        self.assertEqual([event.event_type for event in events], ["Earnings", "Dividend"])
+        self.assertEqual(events[0].event, "Earnings")
+        self.assertEqual(events[0].source, "Yahoo Finance calendar")
+        self.assertEqual(events[1].event, "Ex-dividend")
+        self.assertTrue(events[1].is_date_only)
 
     def test_euronext_listing_uses_official_search_isin_fallback(self) -> None:
         class TickerStub:

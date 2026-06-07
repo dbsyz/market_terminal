@@ -9,6 +9,9 @@ import pandas as pd
 
 from market_terminal.app import (
     DOWN,
+    PRICE_RENDER_DESCRIPTIONS,
+    PRICE_RENDER_LABELS,
+    PRICE_RENDER_MODES,
     UP,
     anchored_text_bounds,
     calculate_return,
@@ -36,6 +39,7 @@ from market_terminal.app import (
     ordered_text_blocks,
     price_move_color,
     prepare_comparison_frames,
+    quote_allows_realtime_refresh,
     quote_change_tag,
     rectangle_is_drag,
     rectangles_intersect,
@@ -46,12 +50,16 @@ from market_terminal.app import (
     technical_indicator,
     technical_study_label,
     watchlist_asset_label,
+    watchlist_group_label,
+    watchlist_group_name,
+    watchlist_group_row,
+    watchlist_display_values,
     watchlist_heading_height,
     watchlist_item_tags,
     watchlist_row_from_instrument,
     watchlist_row_stripe,
 )
-from market_terminal.models import HISTORICAL_RANGES, INTRADAY_MATRIX, Instrument
+from market_terminal.models import HISTORICAL_RANGES, INTRADAY_MATRIX, Instrument, QuoteSnapshot
 
 
 class ReturnCalculationTests(unittest.TestCase):
@@ -97,6 +105,15 @@ class MoveColorTests(unittest.TestCase):
     def test_quote_values_are_rounded_to_two_decimals(self) -> None:
         self.assertEqual(format_quote_value(1.2345), "1.23")
         self.assertEqual(format_quote_value(1234.567), "1,234.57")
+
+    def test_closed_market_quotes_back_off_from_realtime_refresh(self) -> None:
+        self.assertFalse(
+            quote_allows_realtime_refresh(QuoteSnapshot(last=100.0, market_state="CLOSED"))
+        )
+        self.assertTrue(
+            quote_allows_realtime_refresh(QuoteSnapshot(last=100.0, market_state="REGULAR"))
+        )
+        self.assertTrue(quote_allows_realtime_refresh(QuoteSnapshot(last=100.0)))
 
     def test_watchlist_heading_height_uses_first_row_y_offset(self) -> None:
         class TreeStub:
@@ -284,6 +301,32 @@ class InstrumentIdentityTests(unittest.TestCase):
 
         self.assertEqual(restored, instrument)
 
+    def test_round_trips_watchlist_group_state(self) -> None:
+        row = watchlist_group_row("  Core Tech  ")
+
+        self.assertEqual(row, {"type": "group", "name": "Core Tech"})
+        self.assertEqual(watchlist_group_name(row), "Core Tech")
+        self.assertEqual(watchlist_group_label("Core Tech"), "[ CORE TECH ]")
+        self.assertIsNone(instrument_from_watchlist_row(row))
+
+    def test_watchlist_display_values_restore_cached_quote_cells(self) -> None:
+        instrument = Instrument("AAPL", "Apple Inc.")
+        row = watchlist_row_from_instrument(instrument)
+        row["display_values"] = ["AAPL", "195.00", "194.95", "195.05", "+1.20%", "55.2M", "90ms"]
+
+        self.assertEqual(
+            watchlist_display_values(row, instrument),
+            ("AAPL", "195.00", "194.95", "195.05", "+1.20%", "55.2M", "90ms"),
+        )
+
+    def test_watchlist_display_values_fall_back_to_loading(self) -> None:
+        instrument = Instrument("AAPL", "Apple Inc.")
+
+        self.assertEqual(
+            watchlist_display_values({}, instrument),
+            ("AAPL", "Loading", "", "", "", "", ""),
+        )
+
     def test_saves_and_loads_watchlist_state_file(self) -> None:
         from market_terminal.app import load_watchlist_state
 
@@ -293,6 +336,16 @@ class InstrumentIdentityTests(unittest.TestCase):
             save_watchlist_state(path, [{"symbol": "AAPL"}, {}])
 
             self.assertEqual(load_watchlist_state(path), [{"symbol": "AAPL"}, {}])
+
+    def test_loads_watchlist_backup_when_primary_is_empty(self) -> None:
+        from market_terminal.app import load_watchlist_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "watchlist.json"
+            path.write_text("[]", encoding="utf-8")
+            path.with_suffix(".json.bak").write_text('[{"symbol": "AAPL"}]', encoding="utf-8")
+
+            self.assertEqual(load_watchlist_state(path), [{"symbol": "AAPL"}])
 
     def test_saves_and_loads_layout_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -532,6 +585,24 @@ class IntradayMatrixTests(unittest.TestCase):
         one_month = dict(INTRADAY_MATRIX)["1M"]
 
         self.assertNotIn("1m", [spec.interval for spec in one_month])
+
+
+class PriceRenderModeTests(unittest.TestCase):
+    def test_price_render_modes_cover_supported_chart_types(self) -> None:
+        self.assertEqual(
+            PRICE_RENDER_MODES,
+            (
+                "bars",
+                "candles",
+                "hollow_candles",
+                "hlc_bars",
+                "line",
+                "line_markers",
+                "step_line",
+            ),
+        )
+        self.assertEqual(set(PRICE_RENDER_LABELS), set(PRICE_RENDER_MODES))
+        self.assertEqual(set(PRICE_RENDER_DESCRIPTIONS), set(PRICE_RENDER_MODES))
 
 
 def _returns_frame(returns: list[float]) -> pd.DataFrame:

@@ -1,6 +1,6 @@
 # Data Roadmap
 
-Last reviewed: 2026-06-01
+Last reviewed: 2026-06-07
 
 This file tracks the best free or publicly available data sources to evaluate
 for Market Terminal. Every source must remain honest about coverage, delay,
@@ -24,7 +24,7 @@ source was selected, and expose source quality to the user.
 
 | Source | Current Use | Coverage | Status | Caveats |
 | --- | --- | --- | --- | --- |
-| Yahoo Finance via `yfinance` | Search, chart history, metadata | Equities, ETFs, indices, FX, crypto, funds where Yahoo exposes them | Primary price provider | Unofficial access path; data can be delayed, incomplete, or change without notice. Keep attribution and fallback behavior visible. |
+| Yahoo Finance via `yfinance` | Search, chart history, metadata, best-effort selected-ticker events | Equities, ETFs, indices, FX, crypto, funds where Yahoo exposes them | Primary price provider; initial event calendar source | Unofficial access path; data can be delayed, incomplete, or change without notice. Event calendar shapes vary by ticker and may only provide dates, not exact local times. Keep attribution and fallback behavior visible. |
 | Binance Spot public API | Crypto chart history and quotes | Binance-listed spot crypto pairs | Implemented as preferred crypto source | Public market data requires no key, but coverage is exchange-specific and access may be geographically restricted. Yahoo remains fallback for unsupported pairs. |
 | OpenFIGI | Identifier mapping | FIGI, ISIN/CUSIP/ticker mapping and Open Symbology metadata | Implemented for identifier lookup | Free and public, but rate-limited. No prices. |
 | Twelve Data | Optional search/history fallback | Multi-asset market data depending on plan and endpoint | Optional configured provider | Free tier exists but is quota-limited; verify endpoint availability before relying on it. |
@@ -70,6 +70,16 @@ volume.
 | Nasdaq Data Link | Free open datasets, some central bank/government datasets | API key may be needed | Many valuable datasets are premium; use free/open datasets only unless paid access is explicitly approved. |
 | NewsAPI | General live article search | API key | Free developer plan is for development; not a dependable production financial-news backend. |
 
+## Event Calendar Candidates
+
+| Source | Best Use | Requirements | Caveats |
+| --- | --- | --- | --- |
+| Yahoo Finance via `yfinance` | First selected-ticker earnings/dividend/split event surface | No key | Implemented as best-effort. Unofficial, incomplete, and may return date-only events or no rows for supported tickers. |
+| Alpha Vantage `EARNINGS_CALENDAR` | Upcoming earnings dates in CSV form | Free API key | Officially documented endpoint with horizons such as 3-month; rate limits apply and exact time-of-day may be limited. |
+| Finnhub earnings calendar | Earnings date plus before/after-market style timing where available | Free API key | Documented earnings calendar endpoint includes fields such as date/hour and estimates, but free-tier availability and terms need validation before enabling by default. |
+| SEC EDGAR submissions | Actual filing events for US-listed SEC registrants | No key, SEC-compliant user agent/rate behavior | Not an earnings-calendar forecast. Best for actual 8-K, 10-Q, 10-K, proxy, insider, and corporate filing events after they occur. |
+| Exchange or issuer investor-relations calendars | Official company events, calls, dividends, AGMs | Usually no key, often no stable API | High provenance but fragmented and scraping-heavy; use only source-specific adapters with clear attribution. |
+
 ## Feature-To-Data Map
 
 | Feature | First Data Sources | Follow-Up Sources |
@@ -79,6 +89,7 @@ volume.
 | Live selected ticker pricing | Binance for mapped crypto, Yahoo/yfinance quote metadata first | Finnhub/Twelve Data only after free-tier validation |
 | Portfolio analysis | Local portfolio files, Yahoo/yfinance bars | SEC fundamentals, FRED/ECB macro overlays |
 | News section | GDELT DOC API via `news_feed.py`, Finnhub company news if available | NewsAPI for development experiments |
+| Event calendar | Yahoo/yfinance event calendar, SEC filings for actual filing events | Alpha Vantage earnings calendar, Finnhub earnings calendar, issuer/exchange calendars |
 | AI quick analysis | Local computed indicators, provider provenance, SEC facts, filings, macro series, news snippets | LLM-backed synthesis after source grounding is reliable |
 | Macro dashboard | FRED, ECB, Treasury Fiscal Data, World Bank | IMF, EIA |
 | Mobile monitor | Same provider services behind a UI-agnostic layer | Telegram alerts, responsive web, native mobile experiments |

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from zoneinfo import ZoneInfo
 
 import matplotlib.dates as mdates
@@ -30,6 +30,7 @@ from .models import (
     INTRADAY_MATRIX,
     INTRADAY_RANGES,
     Instrument,
+    MarketEvent,
     MarketSession,
     RangeSpec,
 )
@@ -111,12 +112,46 @@ MIN_MACRO_WINDOW_WIDTH = 520
 MIN_MACRO_WINDOW_HEIGHT = 320
 MIN_NEWS_WINDOW_WIDTH = 620
 MIN_NEWS_WINDOW_HEIGHT = 360
+MIN_EVENT_WINDOW_WIDTH = 560
+MIN_EVENT_WINDOW_HEIGHT = 280
 SHOW_MACRO_WINDOW = False
 SHOW_NEWS_WINDOW = False
-WATCHLIST_REFRESH_INTERVAL_MS = 5000
+SHOW_EVENT_WINDOW = True
+WATCHLIST_REFRESH_INTERVAL_MS = 120000
+WATCHLIST_REFRESH_STAGGER_MS = 2500
+WATCHLIST_PRIORITY_PAUSE_MS = 20000
+WATCHLIST_CLOSED_REFRESH_INTERVAL_MS = 1800000
+EVENT_GROUP_LOAD_DELAY_MS = 3500
 WATCHLIST_TICK_FLASH_MS = 900
 CHART_TOP_OVERLAY_Y = 6
 CHART_HEADER_LINE_GAP = 21
+PRICE_RENDER_MODES = (
+    "bars",
+    "candles",
+    "hollow_candles",
+    "hlc_bars",
+    "line",
+    "line_markers",
+    "step_line",
+)
+PRICE_RENDER_LABELS = {
+    "bars": "BAR",
+    "candles": "CND",
+    "hollow_candles": "HOL",
+    "hlc_bars": "HLC",
+    "line": "LIN",
+    "line_markers": "MRK",
+    "step_line": "STP",
+}
+PRICE_RENDER_DESCRIPTIONS = {
+    "bars": "OHLC bars",
+    "candles": "candles",
+    "hollow_candles": "hollow candles",
+    "hlc_bars": "HLC bars",
+    "line": "line",
+    "line_markers": "line with markers",
+    "step_line": "step line",
+}
 
 
 @dataclass(frozen=True)
@@ -135,6 +170,59 @@ class BetaModelStats:
     adjusted_r_squared: float
     alpha: OlsCoefficient
     betas: dict[str, OlsCoefficient]
+
+
+class ButtonTooltip:
+    def __init__(self, app: "MarketTerminalApp") -> None:
+        self.app = app
+        self.window: tk.Toplevel | None = None
+        self.after_id: str | None = None
+        self.widget: tk.Widget | None = None
+
+    def schedule(self, widget: tk.Widget) -> None:
+        text = self.app._button_tooltip_text(widget)
+        if not text:
+            return
+        self.cancel()
+        self.widget = widget
+        self.after_id = self.app.after(450, lambda: self.show(widget, text))
+
+    def cancel(self) -> None:
+        if self.after_id:
+            self.app.after_cancel(self.after_id)
+            self.after_id = None
+        self.hide()
+
+    def show(self, widget: tk.Widget, text: str) -> None:
+        self.after_id = None
+        if not widget.winfo_exists():
+            return
+        self.hide()
+        self.window = tk.Toplevel(self.app)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.configure(bg=ORANGE)
+        label = tk.Label(
+            self.window,
+            text=text,
+            bg=PANEL,
+            fg=TEXT,
+            font=(TERMINAL_FONT_FAMILY, 9),
+            padx=8,
+            pady=5,
+            justify=tk.LEFT,
+        )
+        label.pack(padx=1, pady=1)
+        x = widget.winfo_rootx()
+        y = widget.winfo_rooty() + widget.winfo_height() + 5
+        self.window.geometry(f"+{x}+{y}")
+        self.window.deiconify()
+        self.window.lift()
+
+    def hide(self) -> None:
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
 
 
 class MarketTerminalApp(tk.Tk):
@@ -160,6 +248,7 @@ class MarketTerminalApp(tk.Tk):
 
         self.search_var = tk.StringVar(value="")
         self.watchlist_search_var = tk.StringVar(value="")
+        self.event_search_var = tk.StringVar(value="")
         self.mode_var = tk.StringVar(value="Intraday")
         self.status_var = tk.StringVar(
             value="Public/delayed market data via Yahoo Finance | Identifier mapping via OpenFIGI"
@@ -174,7 +263,7 @@ class MarketTerminalApp(tk.Tk):
         self.hours_var = tk.StringVar(value="")
         self.extended_hours_var = tk.BooleanVar(value=False)
         self.display_mode_var = tk.StringVar(value="Prices")
-        self.price_render_mode = "line"
+        self.price_render_mode = "bars"
         self.compare_visible_var = tk.BooleanVar(value=False)
         self.rebase_comparison_var = tk.BooleanVar(value=False)
         self.betas_comparison_var = tk.BooleanVar(value=False)
@@ -186,10 +275,12 @@ class MarketTerminalApp(tk.Tk):
         self.historical_end_var = tk.StringVar(value="")
         self.chart_group_var = tk.StringVar(value="A")
         self.watchlist_group_var = tk.StringVar(value="A")
+        self.event_group_var = tk.StringVar(value="A")
         self.macro_category_var = tk.StringVar(value="rates")
         self.macro_status_var = tk.StringVar(value="FRED macro dashboard")
         self.news_topic_var = tk.StringVar(value="Markets")
         self.news_status_var = tk.StringVar(value="Live news via GDELT. Click REFRESH to load.")
+        self.event_status_var = tk.StringVar(value="Select a grouped watchlist stock or search.")
         self.local_time_var = tk.StringVar(value="")
         self.new_york_time_var = tk.StringVar(value="")
         self.london_time_var = tk.StringVar(value="")
@@ -205,6 +296,10 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_editor: tk.Entry | None = None
         self.watchlist_quote_inflight: set[str] = set()
         self.watchlist_refresh_after_id: str | None = None
+        self.watchlist_item_refresh_after_ids: dict[str, str] = {}
+        self.watchlist_save_after_id: str | None = None
+        self.event_group_load_after_id: str | None = None
+        self.watchlist_next_refresh_at: dict[str, float] = {}
         self.watchlist_last_quotes: dict[str, tuple[float | None, float | None, float | None]] = {}
         self.watchlist_tick_reset_after_ids: dict[str, str] = {}
         self.watchlist_drag_item: str | None = None
@@ -212,6 +307,9 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_drag_active = False
         self.watchlist_next_row_id = 1
         self.watchlist_context_item: str | None = None
+        self.watchlist_groups: dict[str, str] = {}
+        self.event_instrument: Instrument | None = None
+        self.event_search_update_internal = False
         self.add_to_compare_mode = False
         self.suggestion_anchor = None
         self.selected_instrument: Instrument | None = None
@@ -251,12 +349,16 @@ class MarketTerminalApp(tk.Tk):
         self.portfolio_quote_request_id = 0
         self.portfolio_quote_hide_after_id: str | None = None
         self.news_request_id = 0
+        self.event_request_id = 0
+        self.button_tooltip = ButtonTooltip(self)
 
         self._configure_styles()
+        self._install_button_tooltips()
         self._build_controls()
         self._build_chart()
         self.search_var.trace_add("write", self._on_search_text_changed)
         self.watchlist_search_var.trace_add("write", self._on_watchlist_search_text_changed)
+        self.event_search_var.trace_add("write", self._on_event_search_text_changed)
         self.bind("<ButtonPress-1>", self._dismiss_suggestions_on_click, add="+")
         self.bind_all("<Control-f>", self._focus_primary_search)
         self.bind_all("<Control-F>", self._focus_primary_search)
@@ -383,8 +485,14 @@ class MarketTerminalApp(tk.Tk):
             fieldbackground=PANEL,
             foreground=TEXT,
             rowheight=27,
+            font=(TERMINAL_FONT_FAMILY, 9),
         )
-        style.configure("Treeview.Heading", background=GRID, foreground=TEXT)
+        style.configure(
+            "Treeview.Heading",
+            background=GRID,
+            foreground=TEXT,
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
+        )
         style.configure(
             "Watchlist.Treeview",
             background=WATCHLIST_ROW_ODD,
@@ -394,6 +502,7 @@ class MarketTerminalApp(tk.Tk):
             borderwidth=1,
             relief=tk.SOLID,
             rowheight=27,
+            font=(TERMINAL_FONT_FAMILY, 9),
         )
         style.configure(
             "Watchlist.Treeview.Heading",
@@ -402,6 +511,7 @@ class MarketTerminalApp(tk.Tk):
             bordercolor=BG,
             borderwidth=1,
             relief=tk.RAISED,
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
         )
         style.map("Treeview", background=[("selected", ORANGE)], foreground=[("selected", BG)])
         style.configure("TCheckbutton", background=BG, foreground=MUTED)
@@ -433,6 +543,85 @@ class MarketTerminalApp(tk.Tk):
             foreground=[("selected", TEXT), ("active", TEXT)],
             indicatorcolor=[("selected", ORANGE)],
         )
+
+    def _install_button_tooltips(self) -> None:
+        for widget_class in ("Button", "TButton", "TCheckbutton", "Menubutton"):
+            self.bind_class(
+                widget_class,
+                "<Enter>",
+                lambda event: self.button_tooltip.schedule(event.widget),
+                add="+",
+            )
+            self.bind_class(
+                widget_class,
+                "<Leave>",
+                lambda _event: self.button_tooltip.cancel(),
+                add="+",
+            )
+            self.bind_class(
+                widget_class,
+                "<ButtonPress>",
+                lambda _event: self.button_tooltip.cancel(),
+                add="+",
+            )
+
+    def _set_tooltip(self, widget: tk.Widget, text: str) -> tk.Widget:
+        widget.tooltip_text = text
+        return widget
+
+    def _button_tooltip_text(self, widget: tk.Widget) -> str:
+        text = getattr(widget, "tooltip_text", "")
+        if text:
+            return text
+        try:
+            label = str(widget.cget("text")).strip()
+        except tk.TclError:
+            label = ""
+        if not label:
+            return ""
+        normalized = " ".join(label.split()).upper()
+        defaults = {
+            MAXIMIZE_ICON: "Maximize or restore this panel.",
+            "R": "Refresh this panel's data.",
+            "T": "Open technical indicator choices.",
+            "E": "Toggle extended-hours price data when available.",
+            "C": "Open the comparison series panel.",
+            "BAR": "Chart type: OHLC bars. Click to cycle chart type.",
+            "CND": "Chart type: candles. Click to cycle chart type.",
+            "HOL": "Chart type: hollow candles. Click to cycle chart type.",
+            "HLC": "Chart type: HLC bars. Click to cycle chart type.",
+            "LIN": "Chart type: line. Click to cycle chart type.",
+            "MRK": "Chart type: line with markers. Click to cycle chart type.",
+            "STP": "Chart type: step line. Click to cycle chart type.",
+            "SEC": "Open SEC filing and fundamentals details for the selected ticker.",
+            "OPEN": "Open the selected search result in the chart.",
+            "ADD TO COMPARE": "Add the selected search result as a comparison series.",
+            "REMOVE": "Remove the selected comparison series.",
+            "CLEAR": "Clear all comparison series.",
+            "APPLY": "Apply the custom intraday range.",
+            "APPLY DAILY": "Apply the custom historical daily range.",
+            "CLEAR SEC CACHE": "Clear cached SEC data and fetch fresh data next time.",
+            "OPEN SELECTED FILING": "Open the selected SEC filing in your browser.",
+            "RELOAD APP": "Restart the app to load changed source files.",
+            "LATER": "Dismiss this update notice for now.",
+        }
+        if normalized in defaults:
+            return defaults[normalized]
+        if normalized.startswith("MOM "):
+            return f"Show {normalized.lower()} price momentum."
+        if normalized.startswith("SIG "):
+            return f"Show {normalized.lower()} volatility."
+        if normalized.startswith("RSI "):
+            return f"Show {normalized} relative strength index."
+        if normalized == "VOLUME":
+            return "Show volume below the price chart."
+        if re.fullmatch(r"\d+[MDY]", normalized) or normalized == "YTD":
+            return f"Switch the chart to the {label} historical range."
+        if re.fullmatch(r"\d+M", normalized):
+            return f"Use {label} intraday bars for the selected window."
+        if normalized in set("ABCDEF"):
+            return f"Link this panel to group {normalized}."
+        return f"Run {label}."
 
     def _tick_header_clocks(self) -> None:
         local_now = datetime.now().astimezone()
@@ -481,6 +670,18 @@ class MarketTerminalApp(tk.Tk):
         title_label.bind("<ButtonPress-1>", self._start_chart_window_drag)
         title_label.bind("<B1-Motion>", self._drag_chart_window)
         title_label.bind("<ButtonRelease-1>", self._finish_chart_window_drag)
+        self.chart_header_summary_label = tk.Label(
+            self.chart_titlebar,
+            textvariable=self.chart_header_summary_var,
+            bg=GRID,
+            fg=TEXT,
+            font=TITLEBAR_BUTTON_FONT,
+            anchor=tk.W,
+            padx=6,
+        )
+        self.chart_header_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=3)
+        self.chart_header_summary_label.bind("<Enter>", self._show_portfolio_quote_popup)
+        self.chart_header_summary_label.bind("<Leave>", self._hide_portfolio_quote_popup)
         self.search_entry = tk.Entry(
             self.chart_titlebar,
             textvariable=self.search_var,
@@ -499,18 +700,6 @@ class MarketTerminalApp(tk.Tk):
         self.search_entry.bind("<Down>", lambda _event: self._move_suggestion_selection(1))
         self.search_entry.bind("<Up>", lambda _event: self._move_suggestion_selection(-1))
         self.search_entry.bind("<FocusIn>", lambda _event: self._set_suggestion_anchor(self.search_entry))
-        self.chart_header_summary_label = tk.Label(
-            self.chart_titlebar,
-            textvariable=self.chart_header_summary_var,
-            bg=GRID,
-            fg=TEXT,
-            font=TITLEBAR_BUTTON_FONT,
-            anchor=tk.W,
-            padx=6,
-        )
-        self.chart_header_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=3)
-        self.chart_header_summary_label.bind("<Enter>", self._show_portfolio_quote_popup)
-        self.chart_header_summary_label.bind("<Leave>", self._hide_portfolio_quote_popup)
         self._build_titlebar_button(self.chart_titlebar, MAXIMIZE_ICON, self._maximize_chart_window)
         self.chart_titlebar.bind("<ButtonPress-1>", self._start_chart_window_drag)
         self.chart_titlebar.bind("<B1-Motion>", self._drag_chart_window)
@@ -563,6 +752,7 @@ class MarketTerminalApp(tk.Tk):
         self._build_watchlist_window()
         self._build_macro_window()
         self._build_news_window()
+        self._build_event_window()
         self.after_idle(self._layout_initial_workspace_windows)
         self.after_idle(self.refresh_watchlist)
         self.after_idle(self._schedule_watchlist_refresh_loop)
@@ -586,6 +776,12 @@ class MarketTerminalApp(tk.Tk):
             height=min(height, 520),
         )
         self.chart_window.place_configure(x=watch_width + 10, y=0, width=chart_width, height=height)
+        self.event_window.place_configure(
+            x=0,
+            y=min(height, 520) + 10,
+            width=watch_width,
+            height=max(MIN_EVENT_WINDOW_HEIGHT, min(320, height - min(height, 520) - 10)),
+        )
         self._hide_macro_window()
         self._hide_news_window()
         self._mark_layout_saved_snapshot()
@@ -597,14 +793,15 @@ class MarketTerminalApp(tk.Tk):
         for name, widget, minimum_width, minimum_height in (
             ("watchlist", self.watchlist_window, 360, 260),
             ("chart", self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT),
+            ("events", self.event_window, MIN_EVENT_WINDOW_WIDTH, MIN_EVENT_WINDOW_HEIGHT),
             ("macro", self.macro_window, MIN_MACRO_WINDOW_WIDTH, MIN_MACRO_WINDOW_HEIGHT),
             ("news", self.news_window, MIN_NEWS_WINDOW_WIDTH, MIN_NEWS_WINDOW_HEIGHT),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
                 continue
-            visible = bool(geometry.get("visible", name in {"watchlist", "chart"}))
-            if not visible and name not in {"watchlist", "chart"}:
+            visible = bool(geometry.get("visible", name in {"watchlist", "chart", "events"}))
+            if not visible and name not in {"watchlist", "chart", "events"}:
                 widget.place_forget()
                 restored = True
                 continue
@@ -620,6 +817,10 @@ class MarketTerminalApp(tk.Tk):
             self._constrain_macro_window_to_desktop()
         if self.news_window.winfo_manager() == "place":
             self._constrain_news_window_to_desktop()
+        if self.event_window.winfo_manager() == "place":
+            self._constrain_event_window_to_desktop()
+        elif "events" not in self.saved_layout_state and SHOW_EVENT_WINDOW:
+            self.event_window.place(x=0, y=520, width=MIN_EVENT_WINDOW_WIDTH, height=MIN_EVENT_WINDOW_HEIGHT)
         self.after(250, self._apply_saved_function_layout_without_constraints)
         return restored
 
@@ -627,14 +828,15 @@ class MarketTerminalApp(tk.Tk):
         for name, widget in (
             ("watchlist", self.watchlist_window),
             ("chart", self.chart_window),
+            ("events", self.event_window),
             ("macro", self.macro_window),
             ("news", self.news_window),
         ):
             geometry = self.saved_layout_state.get(name)
             if not isinstance(geometry, dict):
                 continue
-            visible = bool(geometry.get("visible", name in {"watchlist", "chart"}))
-            if not visible and name not in {"watchlist", "chart"}:
+            visible = bool(geometry.get("visible", name in {"watchlist", "chart", "events"}))
+            if not visible and name not in {"watchlist", "chart", "events"}:
                 widget.place_forget()
                 continue
             widget.place_configure(
@@ -700,7 +902,12 @@ class MarketTerminalApp(tk.Tk):
         menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
 
     def _build_group_selector(
-        self, parent: tk.Widget, variable: tk.StringVar, command
+        self,
+        parent: tk.Widget,
+        variable: tk.StringVar,
+        command,
+        side: str = tk.LEFT,
+        padx: tuple[int, int] = (2, 4),
     ) -> tk.OptionMenu:
         menu = tk.OptionMenu(parent, variable, *tuple("ABCDEF"), command=command)
         menu.configure(
@@ -716,7 +923,7 @@ class MarketTerminalApp(tk.Tk):
             highlightthickness=0,
         )
         menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=ORANGE, activeforeground=BG)
-        menu.pack(side=tk.LEFT, padx=(2, 4), pady=3)
+        menu.pack(side=side, padx=padx, pady=3)
         return menu
 
     def _on_chart_group_changed(self, _value: str | None = None) -> None:
@@ -724,6 +931,14 @@ class MarketTerminalApp(tk.Tk):
 
     def _on_watchlist_group_changed(self, _value: str | None = None) -> None:
         self.status_var.set(f"Watchlist linked to group {self.watchlist_group_var.get()}.")
+
+    def _on_event_group_changed(self, _value: str | None = None) -> None:
+        self.status_var.set(f"Event calendar linked to group {self.event_group_var.get()}.")
+        selected = self.watchlist_tree.selection() if hasattr(self, "watchlist_tree") else ()
+        if selected:
+            instrument = self.watchlist_instruments.get(selected[0])
+            if instrument is not None:
+                self._schedule_grouped_events_from_watchlist(instrument)
 
     def _maximize_chart_window(self) -> None:
         self._maximize_floating_window(self.chart_window, MIN_CHART_WINDOW_WIDTH, MIN_CHART_WINDOW_HEIGHT)
@@ -736,6 +951,9 @@ class MarketTerminalApp(tk.Tk):
 
     def _maximize_news_window(self) -> None:
         self._maximize_floating_window(self.news_window, MIN_NEWS_WINDOW_WIDTH, MIN_NEWS_WINDOW_HEIGHT)
+
+    def _maximize_event_window(self) -> None:
+        self._maximize_floating_window(self.event_window, MIN_EVENT_WINDOW_WIDTH, MIN_EVENT_WINDOW_HEIGHT)
 
     def _maximize_floating_window(
         self, window: tk.Widget, minimum_width: int, minimum_height: int
@@ -837,6 +1055,8 @@ class MarketTerminalApp(tk.Tk):
             self._constrain_macro_window_to_desktop()
         if hasattr(self, "news_window") and SHOW_NEWS_WINDOW:
             self._constrain_news_window_to_desktop()
+        if hasattr(self, "event_window"):
+            self._constrain_event_window_to_desktop()
 
     def _constrain_watchlist_window_to_desktop(self) -> None:
         if self.desktop.winfo_width() < 360 or self.desktop.winfo_height() < 260:
@@ -870,6 +1090,17 @@ class MarketTerminalApp(tk.Tk):
         width = min(max(self.news_window.winfo_width(), MIN_NEWS_WINDOW_WIDTH), desktop_width - left)
         height = min(max(self.news_window.winfo_height(), MIN_NEWS_WINDOW_HEIGHT), desktop_height - top)
         self.news_window.place_configure(x=left, y=top, width=width, height=height)
+
+    def _constrain_event_window_to_desktop(self) -> None:
+        if self.desktop.winfo_width() < MIN_EVENT_WINDOW_WIDTH or self.desktop.winfo_height() < MIN_EVENT_WINDOW_HEIGHT:
+            return
+        desktop_width = max(self.desktop.winfo_width(), MIN_EVENT_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_EVENT_WINDOW_HEIGHT)
+        left = max(0, min(self.event_window.winfo_x(), max(desktop_width - MIN_EVENT_WINDOW_WIDTH, 0)))
+        top = max(0, min(self.event_window.winfo_y(), max(desktop_height - MIN_EVENT_WINDOW_HEIGHT, 0)))
+        width = min(max(self.event_window.winfo_width(), MIN_EVENT_WINDOW_WIDTH), desktop_width - left)
+        height = min(max(self.event_window.winfo_height(), MIN_EVENT_WINDOW_HEIGHT), desktop_height - top)
+        self.event_window.place_configure(x=left, y=top, width=width, height=height)
 
     def _start_watchlist_window_drag(self, event: tk.Event) -> str:
         self.watchlist_window.lift()
@@ -1051,6 +1282,66 @@ class MarketTerminalApp(tk.Tk):
         self._mark_layout_dirty_if_changed()
         return "break"
 
+    def _start_event_window_drag(self, event: tk.Event) -> str:
+        self.event_window.lift()
+        self.floating_window_drag = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "left": self.event_window.winfo_x(),
+            "top": self.event_window.winfo_y(),
+        }
+        return "break"
+
+    def _drag_event_window(self, event: tk.Event) -> str:
+        if not self.floating_window_drag:
+            return "break"
+        desktop_width = max(self.desktop.winfo_width(), MIN_EVENT_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_EVENT_WINDOW_HEIGHT)
+        width = self.event_window.winfo_width()
+        height = self.event_window.winfo_height()
+        left = self.floating_window_drag["left"] + event.x_root - self.floating_window_drag["x"]
+        top = self.floating_window_drag["top"] + event.y_root - self.floating_window_drag["y"]
+        left = max(0, min(left, max(desktop_width - width, 0)))
+        top = max(0, min(top, max(desktop_height - height, 0)))
+        self.event_window.place_configure(x=left, y=top)
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _finish_event_window_drag(self, _event: tk.Event) -> str:
+        self.floating_window_drag = None
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _start_event_window_resize(self, event: tk.Event) -> str:
+        self.event_window.lift()
+        self.floating_window_resize = {
+            "x": event.x_root,
+            "y": event.y_root,
+            "width": self.event_window.winfo_width(),
+            "height": self.event_window.winfo_height(),
+        }
+        return "break"
+
+    def _resize_event_window(self, event: tk.Event) -> str:
+        if not self.floating_window_resize:
+            return "break"
+        left = self.event_window.winfo_x()
+        top = self.event_window.winfo_y()
+        desktop_width = max(self.desktop.winfo_width(), MIN_EVENT_WINDOW_WIDTH)
+        desktop_height = max(self.desktop.winfo_height(), MIN_EVENT_WINDOW_HEIGHT)
+        width = self.floating_window_resize["width"] + event.x_root - self.floating_window_resize["x"]
+        height = self.floating_window_resize["height"] + event.y_root - self.floating_window_resize["y"]
+        width = max(MIN_EVENT_WINDOW_WIDTH, min(width, max(desktop_width - left, MIN_EVENT_WINDOW_WIDTH)))
+        height = max(MIN_EVENT_WINDOW_HEIGHT, min(height, max(desktop_height - top, MIN_EVENT_WINDOW_HEIGHT)))
+        self.event_window.place_configure(width=width, height=height)
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
+    def _finish_event_window_resize(self, _event: tk.Event) -> str:
+        self.floating_window_resize = None
+        self._mark_layout_dirty_if_changed()
+        return "break"
+
     def _build_watchlist_window(self) -> None:
         self.watchlist_window = tk.Frame(
             self.desktop,
@@ -1067,43 +1358,60 @@ class MarketTerminalApp(tk.Tk):
             widget.bind("<ButtonPress-1>", self._start_watchlist_window_drag)
             widget.bind("<B1-Motion>", self._drag_watchlist_window)
             widget.bind("<ButtonRelease-1>", self._finish_watchlist_window_drag)
+        self._build_titlebar_button(
+            self.watchlist_titlebar, MAXIMIZE_ICON, self._maximize_watchlist_window
+        )
         self._build_group_selector(
             self.watchlist_titlebar,
             self.watchlist_group_var,
             self._on_watchlist_group_changed,
-        )
-        self._build_titlebar_button(
-            self.watchlist_titlebar, MAXIMIZE_ICON, self._maximize_watchlist_window
+            side=tk.RIGHT,
+            padx=(0, 3),
         )
         self._build_titlebar_button(self.watchlist_titlebar, "R", self.refresh_watchlist)
         content = ttk.Frame(self.watchlist_window, style="Panel.TFrame", padding=7)
         content.pack(fill=tk.BOTH, expand=True)
+        tree_frame = ttk.Frame(content, style="Panel.TFrame")
+        tree_frame.pack(fill=tk.BOTH, expand=True)
         self.watchlist_tree = ttk.Treeview(
-            content,
+            tree_frame,
             columns=("asset", "last", "bid", "ask", "change", "volume", "latency"),
             show="headings",
             height=12,
             style="Watchlist.Treeview",
         )
+        self.watchlist_scrollbar = ttk.Scrollbar(
+            tree_frame,
+            orient=tk.VERTICAL,
+            command=self.watchlist_tree.yview,
+        )
+        self.watchlist_tree.configure(yscrollcommand=self.watchlist_scrollbar.set)
         self.watchlist_tree.tag_configure("watchlist_even", background=WATCHLIST_ROW_EVEN)
         self.watchlist_tree.tag_configure("watchlist_odd", background=WATCHLIST_ROW_ODD)
         self.watchlist_tree.tag_configure("tick_up", foreground=UP)
         self.watchlist_tree.tag_configure("tick_down", foreground=DOWN)
         self.watchlist_tree.tag_configure("tick_flat", foreground=TEXT)
         self.watchlist_tree.tag_configure("tick_error", foreground=DOWN)
+        self.watchlist_tree.tag_configure(
+            "watchlist_group",
+            background=GRID,
+            foreground=ORANGE,
+            font=(TERMINAL_FONT_FAMILY, 9, "bold"),
+        )
         saved_widths = normalized_watchlist_column_widths(
             self.saved_layout_state.get("watchlist_columns")
         )
         for column, title, default_width in WATCHLIST_COLUMNS:
             anchor = tk.W if column == "asset" else tk.E
-            self.watchlist_tree.heading(column, text=title, anchor=anchor)
+            self.watchlist_tree.heading(column, text=title, anchor=tk.CENTER)
             self.watchlist_tree.column(
                 column,
                 width=saved_widths.get(column, default_width),
                 minwidth=WATCHLIST_MIN_COLUMN_WIDTH,
                 anchor=anchor,
             )
-        self.watchlist_tree.pack(fill=tk.BOTH, expand=True)
+        self.watchlist_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.watchlist_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.watchlist_tree.bind("<ButtonPress-1>", self._start_watchlist_row_drag, add="+")
         self.watchlist_tree.bind("<B1-Motion>", self._drag_watchlist_row, add="+")
         self.watchlist_tree.bind("<ButtonRelease-1>", self._finish_watchlist_row_drag, add="+")
@@ -1111,7 +1419,7 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_tree.bind("<Button-3>", self._show_watchlist_context_menu)
         self.watchlist_tree.bind("<<TreeviewSelect>>", self._on_watchlist_selection_changed)
         self.watchlist_column_separators = [
-            tk.Frame(content, bg=GRID, width=1, cursor="")
+            tk.Frame(tree_frame, bg=GRID, width=1, cursor="")
             for _column in self.watchlist_tree["columns"][:-1]
         ]
         self.watchlist_tree.bind("<Configure>", self._position_watchlist_column_separators, add="+")
@@ -1280,14 +1588,105 @@ class MarketTerminalApp(tk.Tk):
         self.news_resize_grip.bind("<B1-Motion>", self._resize_news_window)
         self.news_resize_grip.bind("<ButtonRelease-1>", self._finish_news_window_resize)
 
+    def _build_event_window(self) -> None:
+        self.event_window = tk.Frame(
+            self.desktop,
+            bg=PANEL,
+            highlightbackground=GRID,
+            highlightthickness=1,
+        )
+        if SHOW_EVENT_WINDOW:
+            self.event_window.place(x=0, y=520, width=560, height=300)
+        self.event_titlebar = tk.Frame(self.event_window, bg=GRID, height=TITLEBAR_HEIGHT, cursor="fleur")
+        self.event_titlebar.pack(fill=tk.X)
+        self.event_titlebar.pack_propagate(False)
+        label = self._build_titlebar_label(self.event_titlebar, "EVENTS")
+        for widget in (self.event_titlebar, label):
+            widget.bind("<ButtonPress-1>", self._start_event_window_drag)
+            widget.bind("<B1-Motion>", self._drag_event_window)
+            widget.bind("<ButtonRelease-1>", self._finish_event_window_drag)
+        self._build_titlebar_button(self.event_titlebar, MAXIMIZE_ICON, self._maximize_event_window)
+        self._build_group_selector(
+            self.event_titlebar,
+            self.event_group_var,
+            self._on_event_group_changed,
+            side=tk.RIGHT,
+            padx=(0, 3),
+        )
+        self._build_titlebar_button(self.event_titlebar, "R", self.refresh_event_calendar)
+        self.event_search_entry = tk.Entry(
+            self.event_titlebar,
+            textvariable=self.event_search_var,
+            bg=BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=(TERMINAL_FONT_FAMILY, 10),
+        )
+        self.event_search_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True, ipady=4, padx=(6, 8), pady=3)
+        self.event_search_entry.bind("<Return>", self._accept_or_search)
+        self.event_search_entry.bind("<Control-a>", self._select_all_event_search_text)
+        self.event_search_entry.bind("<Control-A>", self._select_all_event_search_text)
+        self.event_search_entry.bind("<Escape>", lambda _event: self._hide_transient_panels())
+        self.event_search_entry.bind("<Down>", lambda _event: self._move_suggestion_selection(1))
+        self.event_search_entry.bind("<Up>", lambda _event: self._move_suggestion_selection(-1))
+        self.event_search_entry.bind(
+            "<FocusIn>", lambda _event: self._set_suggestion_anchor(self.event_search_entry)
+        )
+        content = ttk.Frame(self.event_window, style="Panel.TFrame", padding=7)
+        content.pack(fill=tk.BOTH, expand=True)
+        self.event_tree = ttk.Treeview(
+            content,
+            columns=("date", "time", "event", "type", "source"),
+            show="headings",
+            height=8,
+            style="Watchlist.Treeview",
+        )
+        self.event_tree.tag_configure("watchlist_even", background=WATCHLIST_ROW_EVEN)
+        self.event_tree.tag_configure("watchlist_odd", background=WATCHLIST_ROW_ODD)
+        for column, title, width in (
+            ("date", "Date", 95),
+            ("time", "Time (Local)", 95),
+            ("event", "Event", 180),
+            ("type", "Type", 95),
+            ("source", "Source / Note", 210),
+        ):
+            self.event_tree.heading(column, text=title, anchor=tk.CENTER)
+            self.event_tree.column(column, width=width, anchor=tk.W)
+        self.event_tree.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            content,
+            textvariable=self.event_status_var,
+            style="Status.TLabel",
+            padding=(0, 6),
+        ).pack(fill=tk.X)
+        self.event_resize_grip = tk.Frame(
+            self.event_window,
+            bg=PANEL,
+            width=15,
+            height=15,
+            cursor="size_nw_se",
+        )
+        self.event_resize_grip.place(relx=1.0, rely=1.0, anchor=tk.SE)
+        self.event_resize_grip.bind("<ButtonPress-1>", self._start_event_window_resize)
+        self.event_resize_grip.bind("<B1-Motion>", self._resize_event_window)
+        self.event_resize_grip.bind("<ButtonRelease-1>", self._finish_event_window_resize)
+
     def _add_watchlist_row(self, row: dict | None = None, index: int | str = tk.END) -> str:
         item = self._next_watchlist_item_id()
+        group_name = watchlist_group_name(row or {})
+        if group_name:
+            self.watchlist_tree.insert(
+                "",
+                index,
+                iid=item,
+                values=(watchlist_group_label(group_name), "", "", "", "", "", ""),
+                tags=("watchlist_group",),
+            )
+            self.watchlist_groups[item] = group_name
+            return item
         instrument = instrument_from_watchlist_row(row or {})
-        values = (
-            (watchlist_asset_label(instrument), "", "", "", "", "", "")
-            if instrument
-            else ("", "", "", "", "", "", "")
-        )
+        values = watchlist_display_values(row or {}, instrument)
         row_index = (
             len(self.watchlist_tree.get_children())
             if index == tk.END
@@ -1315,10 +1714,15 @@ class MarketTerminalApp(tk.Tk):
                 continue
             self.watchlist_instruments.pop(item, None)
             self.watchlist_last_quotes.pop(item, None)
+            self.watchlist_next_refresh_at.pop(item, None)
+            after_id = self.watchlist_item_refresh_after_ids.pop(item, None)
+            if after_id:
+                self.after_cancel(after_id)
             reset_after_id = self.watchlist_tick_reset_after_ids.pop(item, None)
             if reset_after_id:
                 self.after_cancel(reset_after_id)
             self.watchlist_quote_inflight.discard(item)
+            self.watchlist_groups.pop(item, None)
             self.watchlist_tree.delete(item)
         if not self.watchlist_tree.get_children():
             self._add_watchlist_row()
@@ -1332,7 +1736,7 @@ class MarketTerminalApp(tk.Tk):
         if item:
             self.watchlist_tree.selection_set(item)
         self.watchlist_context_menu.delete(0, tk.END)
-        if item and item in self.watchlist_instruments:
+        if item:
             self.watchlist_context_menu.add_command(
                 label="Insert Row Above",
                 command=lambda item=item: self._insert_watchlist_row_near(item, before=True),
@@ -1341,11 +1745,28 @@ class MarketTerminalApp(tk.Tk):
                 label="Insert Row Below",
                 command=lambda item=item: self._insert_watchlist_row_near(item, before=False),
             )
+            self.watchlist_context_menu.add_command(
+                label="Insert Group Above",
+                command=lambda item=item: self._insert_watchlist_group_near(item, before=True),
+            )
+            self.watchlist_context_menu.add_command(
+                label="Insert Group Below",
+                command=lambda item=item: self._insert_watchlist_group_near(item, before=False),
+            )
+            if item in self.watchlist_groups:
+                self.watchlist_context_menu.add_command(
+                    label="Rename Group",
+                    command=lambda item=item: self._rename_watchlist_group(item),
+                )
             self.watchlist_context_menu.add_separator()
         else:
             self.watchlist_context_menu.add_command(
                 label="Add Row At Bottom",
                 command=self._append_watchlist_row_from_menu,
+            )
+            self.watchlist_context_menu.add_command(
+                label="Add Group At Bottom",
+                command=self._append_watchlist_group_from_menu,
             )
         if item:
             self.watchlist_context_menu.add_command(
@@ -1359,6 +1780,13 @@ class MarketTerminalApp(tk.Tk):
         self._add_watchlist_row()
         self._save_watchlist_state()
 
+    def _append_watchlist_group_from_menu(self) -> None:
+        name = self._prompt_watchlist_group_name()
+        if not name:
+            return
+        self._add_watchlist_group(name)
+        self._save_watchlist_state()
+
     def _insert_watchlist_row_near(self, item: str, before: bool) -> None:
         if not self.watchlist_tree.exists(item):
             return
@@ -1367,13 +1795,55 @@ class MarketTerminalApp(tk.Tk):
         self._add_watchlist_row(index=insert_index)
         self._save_watchlist_state()
 
+    def _insert_watchlist_group_near(self, item: str, before: bool) -> None:
+        if not self.watchlist_tree.exists(item):
+            return
+        name = self._prompt_watchlist_group_name()
+        if not name:
+            return
+        target_index = self.watchlist_tree.index(item)
+        insert_index = target_index if before else target_index + 1
+        self._add_watchlist_group(name, index=insert_index)
+        self._save_watchlist_state()
+
+    def _add_watchlist_group(self, name: str, index: int | str = tk.END) -> str:
+        item = self._add_watchlist_row(watchlist_group_row(name), index=index)
+        self._ensure_watchlist_trailing_empty_row()
+        return item
+
+    def _rename_watchlist_group(self, item: str) -> None:
+        if item not in self.watchlist_groups:
+            return
+        name = self._prompt_watchlist_group_name(self.watchlist_groups[item])
+        if not name:
+            return
+        self.watchlist_groups[item] = name
+        self.watchlist_tree.item(
+            item,
+            values=(watchlist_group_label(name), "", "", "", "", "", ""),
+            tags=("watchlist_group",),
+        )
+        self._save_watchlist_state()
+
+    def _prompt_watchlist_group_name(self, initial: str = "") -> str:
+        name = simpledialog.askstring(
+            "Watchlist Group",
+            "Group name:",
+            initialvalue=initial or "New Group",
+            parent=self,
+        )
+        return " ".join((name or "").strip().split())
+
     def _ensure_watchlist_trailing_empty_row(self) -> None:
         children = self.watchlist_tree.get_children()
-        if not children or children[-1] in self.watchlist_instruments:
+        if not children or children[-1] in self.watchlist_instruments or children[-1] in self.watchlist_groups:
             self._add_watchlist_row()
 
     def _apply_watchlist_row_stripes(self) -> None:
         for row_index, item in enumerate(self.watchlist_tree.get_children()):
+            if item in self.watchlist_groups:
+                self.watchlist_tree.item(item, tags=("watchlist_group",))
+                continue
             direction = next(
                 (
                     tag
@@ -1431,6 +1901,8 @@ class MarketTerminalApp(tk.Tk):
         target = self.watchlist_tree.identify_row(event.y)
         if target and target != item:
             target_index = self.watchlist_tree.index(target)
+            if target in self.watchlist_groups and item not in self.watchlist_groups:
+                target_index += 1
             self.watchlist_tree.move(item, "", target_index)
             self.watchlist_tree.selection_set(item)
         return "break"
@@ -1457,7 +1929,9 @@ class MarketTerminalApp(tk.Tk):
         instrument = self.watchlist_instruments.get(selected[0])
         if instrument is None:
             return
+        self._pause_watchlist_refresh_for_priority()
         self._open_grouped_chart_from_watchlist(instrument)
+        self._schedule_grouped_events_from_watchlist(instrument)
 
     def _open_grouped_chart_from_watchlist(self, instrument: Instrument) -> None:
         if self.watchlist_group_var.get() != self.chart_group_var.get():
@@ -1469,10 +1943,40 @@ class MarketTerminalApp(tk.Tk):
         )
         self._open_instrument(instrument)
 
+    def _open_grouped_events_from_watchlist(self, instrument: Instrument) -> None:
+        if self.watchlist_group_var.get() != self.event_group_var.get():
+            return
+        if self.event_instrument and self.event_instrument.symbol == instrument.symbol:
+            return
+        self.status_var.set(
+            f"Group {self.watchlist_group_var.get()}: loading events for {instrument.symbol}."
+        )
+        self._open_event_calendar(instrument)
+
+    def _schedule_grouped_events_from_watchlist(self, instrument: Instrument) -> None:
+        if self.watchlist_group_var.get() != self.event_group_var.get():
+            return
+        if self.event_group_load_after_id:
+            self.after_cancel(self.event_group_load_after_id)
+        self.event_group_load_after_id = self.after(
+            EVENT_GROUP_LOAD_DELAY_MS,
+            lambda instrument=instrument: self._load_scheduled_grouped_events(instrument),
+        )
+
+    def _load_scheduled_grouped_events(self, instrument: Instrument) -> None:
+        self.event_group_load_after_id = None
+        selected = self.watchlist_tree.selection()
+        if not selected:
+            return
+        current = self.watchlist_instruments.get(selected[0])
+        if current is None or current.symbol != instrument.symbol:
+            return
+        self._open_grouped_events_from_watchlist(instrument)
+
     def _begin_watchlist_asset_search(self, event: tk.Event) -> str:
         item = self.watchlist_tree.identify_row(event.y)
         column = self.watchlist_tree.identify_column(event.x)
-        if not item or column != "#1":
+        if not item or column != "#1" or item in self.watchlist_groups:
             return "break"
         self._destroy_watchlist_editor()
         self.watchlist_target_item = item
@@ -1534,7 +2038,7 @@ class MarketTerminalApp(tk.Tk):
             text="NEW VERSION AVAILABLE  |  App source has changed. Reload to apply updates.",
             style="Update.TLabel",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(
+        reload_button = tk.Button(
             self.update_banner,
             text="RELOAD APP",
             command=self._reload_app,
@@ -1546,8 +2050,10 @@ class MarketTerminalApp(tk.Tk):
             font=(TERMINAL_FONT_FAMILY, 9, "bold"),
             padx=10,
             pady=4,
-        ).pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Button(
+        )
+        self._set_tooltip(reload_button, "Restart the app to load changed source files.")
+        reload_button.pack(side=tk.RIGHT, padx=(8, 0))
+        later_button = tk.Button(
             self.update_banner,
             text="LATER",
             command=self._dismiss_update_banner,
@@ -1559,21 +2065,20 @@ class MarketTerminalApp(tk.Tk):
             font=(TERMINAL_FONT_FAMILY, 9),
             padx=8,
             pady=4,
-        ).pack(side=tk.RIGHT, padx=(8, 0))
+        )
+        self._set_tooltip(later_button, "Dismiss this update notice for now.")
+        later_button.pack(side=tk.RIGHT, padx=(8, 0))
 
     def _poll_for_source_update(self) -> None:
         current_snapshot = source_file_snapshot(self.source_watch_paths)
         if current_snapshot != self.source_snapshot and not self.update_banner.winfo_ismapped():
-            self.update_banner.pack(
-                fill=tk.X,
-                padx=18,
-                pady=(0, 10),
-            )
+            self.update_banner.place(x=18, y=58, relwidth=1.0, width=-36)
+            self.update_banner.lift()
         self.after(SOURCE_WATCH_INTERVAL_MS, self._poll_for_source_update)
 
     def _dismiss_update_banner(self) -> None:
         self.source_snapshot = source_file_snapshot(self.source_watch_paths)
-        self.update_banner.pack_forget()
+        self.update_banner.place_forget()
 
     def _reload_app(self) -> None:
         self._save_app_state()
@@ -1610,6 +2115,13 @@ class MarketTerminalApp(tk.Tk):
             self.after_cancel(self.layout_save_after_id)
         if self.watchlist_refresh_after_id:
             self.after_cancel(self.watchlist_refresh_after_id)
+        for after_id in self.watchlist_item_refresh_after_ids.values():
+            self.after_cancel(after_id)
+        self.watchlist_item_refresh_after_ids = {}
+        if self.event_group_load_after_id:
+            self.after_cancel(self.event_group_load_after_id)
+        if self.watchlist_save_after_id:
+            self.after_cancel(self.watchlist_save_after_id)
         self._save_app_state()
         self.destroy()
 
@@ -1629,6 +2141,7 @@ class MarketTerminalApp(tk.Tk):
         layout = {
             "watchlist": window_layout_state(self.watchlist_window),
             "chart": window_layout_state(self.chart_window),
+            "events": window_layout_state(self.event_window),
             "macro": window_layout_state(self.macro_window),
             "news": window_layout_state(self.news_window),
             "watchlist_columns": self._watchlist_column_widths(),
@@ -1651,6 +2164,7 @@ class MarketTerminalApp(tk.Tk):
         return {
             "watchlist": window_layout_state(self.watchlist_window),
             "chart": window_layout_state(self.chart_window),
+            "events": window_layout_state(self.event_window),
             "macro": window_layout_state(self.macro_window),
             "news": window_layout_state(self.news_window),
             "watchlist_columns": self._watchlist_column_widths(),
@@ -1729,14 +2243,17 @@ class MarketTerminalApp(tk.Tk):
         self.result_tree.bind("<Up>", lambda _event: self._move_suggestion_selection(-1))
         actions = ttk.Frame(suggestion_panel, style="Panel.TFrame")
         actions.pack(fill=tk.X, pady=(7, 0))
-        ttk.Button(actions, text="OPEN", command=self._open_search_result).pack(
-            side=tk.LEFT, padx=(0, 5)
+        open_button = ttk.Button(actions, text="OPEN", command=self._accept_search_result)
+        self._set_tooltip(open_button, "Open the selected search result in the active panel.")
+        open_button.pack(side=tk.LEFT, padx=(0, 5))
+        add_button = ttk.Button(
+            actions,
+            text="ADD TO COMPARE",
+            style="Accent.TButton",
+            command=self._add_search_result,
         )
-        ttk.Button(
-            actions, text="ADD TO COMPARE", style="Accent.TButton", command=self._add_search_result
-        ).pack(
-            side=tk.LEFT
-        )
+        self._set_tooltip(add_button, "Add the selected search result as a comparison series.")
+        add_button.pack(side=tk.LEFT)
         ttk.Label(
             actions, text="  Enter / double-click: highlighted action", style="Status.TLabel"
         ).pack(side=tk.LEFT, padx=(7, 0))
@@ -1763,6 +2280,7 @@ class MarketTerminalApp(tk.Tk):
             variable=self.rebase_comparison_var,
             command=self._set_comparison_rebase,
         )
+        self._set_tooltip(self.rebase_check, "Rebase all comparison series to 100.")
         self.rebase_check.pack(side=tk.LEFT)
         self.betas_check = ttk.Checkbutton(
             mode_controls,
@@ -1771,6 +2289,7 @@ class MarketTerminalApp(tk.Tk):
             variable=self.betas_comparison_var,
             command=self._set_comparison_betas,
         )
+        self._set_tooltip(self.betas_check, "Show beta regression statistics versus the primary series.")
         self.betas_check.pack(side=tk.LEFT, padx=(5, 0))
         self.beta_summary_var = tk.StringVar(value="")
         self.beta_summary_label = ttk.Label(
@@ -1811,14 +2330,21 @@ class MarketTerminalApp(tk.Tk):
         ).pack(anchor=tk.W, pady=(0, 3))
         actions = ttk.Frame(panel_content, style="Panel.TFrame")
         actions.pack(fill=tk.X, pady=(7, 0))
-        ttk.Button(actions, text="REMOVE", command=self._remove_chart_series).pack(
-            side=tk.LEFT, padx=(0, 5)
-        )
-        ttk.Button(actions, text="CLEAR", command=self._clear_chart_series).pack(side=tk.LEFT)
+        remove_button = ttk.Button(actions, text="REMOVE", command=self._remove_chart_series)
+        self._set_tooltip(remove_button, "Remove the selected comparison series.")
+        remove_button.pack(side=tk.LEFT, padx=(0, 5))
+        clear_button = ttk.Button(actions, text="CLEAR", command=self._clear_chart_series)
+        self._set_tooltip(clear_button, "Clear all comparison series.")
+        clear_button.pack(side=tk.LEFT)
 
     def _select_all_search_text(self, _event: tk.Event | None = None) -> str:
         self.search_entry.selection_range(0, tk.END)
         self.search_entry.icursor(tk.END)
+        return "break"
+
+    def _select_all_event_search_text(self, _event: tk.Event | None = None) -> str:
+        self.event_search_entry.selection_range(0, tk.END)
+        self.event_search_entry.icursor(tk.END)
         return "break"
 
     def _focus_primary_search(self, _event: tk.Event | None = None) -> str:
@@ -1875,9 +2401,28 @@ class MarketTerminalApp(tk.Tk):
             return
         self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
 
+    def _on_event_search_text_changed(self, *_args) -> None:
+        if self.event_search_update_internal:
+            return
+        if self.suggestion_anchor != self.event_search_entry:
+            return
+        if self.search_after_id:
+            self.after_cancel(self.search_after_id)
+            self.search_after_id = None
+        query = self.event_search_var.get().strip()
+        if not query:
+            self.search_request_id += 1
+            self.results = []
+            self.raw_results = []
+            self._hide_suggestions(restore_focus=False)
+            return
+        self.search_after_id = self.after(SEARCH_DEBOUNCE_MS, self.search_assets)
+
     def _active_search_query(self) -> str:
         if self.suggestion_anchor == self.watchlist_editor:
             return self.watchlist_search_var.get().strip()
+        if self.suggestion_anchor == self.event_search_entry:
+            return self.event_search_var.get().strip()
         return self.search_var.get().strip()
 
     def _set_suggestion_anchor(self, entry) -> None:
@@ -1888,6 +2433,9 @@ class MarketTerminalApp(tk.Tk):
         elif entry == self.watchlist_editor:
             self.add_to_compare_mode = False
             self.search_action_var.set("SET WATCHLIST ASSET")
+        elif entry == self.event_search_entry:
+            self.add_to_compare_mode = False
+            self.search_action_var.set("OPEN EVENT CALENDAR")
         else:
             self.add_to_compare_mode = False
             self.search_action_var.set("OPEN SECURITY")
@@ -1898,10 +2446,11 @@ class MarketTerminalApp(tk.Tk):
         height = 338
         is_compare = anchor == self.compare_search_entry
         is_watchlist = anchor == self.watchlist_editor
-        minimum_width = 420 if is_watchlist else 625 if is_compare else 720
+        is_events = anchor == self.event_search_entry
+        minimum_width = 420 if is_watchlist or is_events else 625 if is_compare else 720
         preferred_width = (
             max(minimum_width, anchor.winfo_width() + 320)
-            if is_watchlist
+            if is_watchlist or is_events
             else minimum_width if is_compare else max(minimum_width, anchor.winfo_width())
         )
         window_left = self.winfo_rootx() + 12
@@ -1921,7 +2470,7 @@ class MarketTerminalApp(tk.Tk):
             window_bottom=window_bottom,
             align_right=is_compare,
         )
-        self._size_suggestion_columns(width, is_compare or is_watchlist)
+        self._size_suggestion_columns(width, is_compare or is_watchlist or is_events)
         self.suggestion_popup.geometry(f"{width}x{height}+{x}+{y}")
         self.suggestion_popup.deiconify()
         self.suggestion_popup.lift()
@@ -1965,6 +2514,8 @@ class MarketTerminalApp(tk.Tk):
         if not self.text_selection_dragging:
             self._clear_text_selection_outline()
         active_anchors = [self.search_entry]
+        if hasattr(self, "event_search_entry"):
+            active_anchors.append(self.event_search_entry)
         if self.watchlist_editor is not None:
             active_anchors.append(self.watchlist_editor)
         if event.widget not in active_anchors and self.suggestion_popup.state() != "withdrawn":
@@ -2054,7 +2605,7 @@ class MarketTerminalApp(tk.Tk):
 
     def _build_chart(self) -> None:
         self.figure = Figure(figsize=(8, 5), dpi=100, facecolor=BG)
-        self.figure.subplots_adjust(left=0.055, right=0.985, top=0.985, bottom=0.085)
+        self.figure.subplots_adjust(left=0.035, right=0.905, top=0.985, bottom=0.085)
         grid = self.figure.add_gridspec(4, 1, hspace=0.02)
         self.price_axis = self.figure.add_subplot(grid[:3, 0])
         self.volume_axis = self.figure.add_subplot(grid[3, 0], sharex=self.price_axis)
@@ -2120,6 +2671,7 @@ class MarketTerminalApp(tk.Tk):
             width=3,
             style="Selected.Header.TButton",
         )
+        self._set_tooltip(self.time_range_button, "Open chart time range and bar interval choices.")
         self.time_range_button.pack(side=tk.LEFT)
         self.time_range_button.bind(
             "<Enter>", lambda _event: self._show_range_popup("Time Range", self.time_range_button)
@@ -2131,6 +2683,7 @@ class MarketTerminalApp(tk.Tk):
             width=3,
             style="Header.TButton",
         )
+        self._set_tooltip(self.technical_button, "Open technical indicator choices.")
         self.technical_button.pack(side=tk.LEFT, padx=(4, 8))
         self.technical_button.bind(
             "<Enter>", lambda _event: self._show_range_popup("Technical", self.technical_button)
@@ -2144,6 +2697,7 @@ class MarketTerminalApp(tk.Tk):
             variable=self.extended_hours_var,
             command=self.refresh_chart,
         )
+        self._set_tooltip(self.extended_hours_check, "Toggle extended-hours price data when available.")
         self.extended_hours_check.pack(side=tk.LEFT, padx=(0, 8))
         self.extended_hours_check.state(["disabled"])
         self.compare_button = ttk.Button(
@@ -2153,14 +2707,16 @@ class MarketTerminalApp(tk.Tk):
             style="Header.TButton",
             command=self._toggle_compare_button,
         )
+        self._set_tooltip(self.compare_button, "Open or close the comparison series panel.")
         self.compare_button.pack(side=tk.LEFT)
         self.price_render_button = ttk.Button(
             self.chart_toolbar,
             text=self._price_render_button_label(),
-            width=3,
+            width=4,
             style="Header.TButton",
             command=self._cycle_price_render_mode,
         )
+        self._update_price_render_button()
         self.price_render_button.pack(side=tk.LEFT, padx=(4, 0))
         self.sec_details_button = ttk.Button(
             self.chart_toolbar,
@@ -2169,6 +2725,7 @@ class MarketTerminalApp(tk.Tk):
             style="Header.TButton",
             command=self._show_sec_details,
         )
+        self._set_tooltip(self.sec_details_button, "Open SEC filing and fundamentals details.")
         self.sec_details_button.pack(side=tk.LEFT, padx=(8, 0))
         self.sec_details_button.state(["disabled"])
         self._build_group_selector(
@@ -2383,6 +2940,10 @@ class MarketTerminalApp(tk.Tk):
                     command=lambda value=range_spec: self._choose_range(value, "Intraday"),
                 )
                 button.grid(row=row, column=column, padx=2, pady=2)
+                self._set_tooltip(
+                    button,
+                    f"Use {range_spec.interval} bars for the {duration} intraday window.",
+                )
                 button.bind("<Enter>", lambda _event: self._cancel_range_popup_hide())
                 self.range_buttons.append((button, range_spec))
         custom_intraday_row = len(INTRADAY_MATRIX) + 2
@@ -2412,12 +2973,14 @@ class MarketTerminalApp(tk.Tk):
             state="readonly",
         )
         interval.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
+        apply_intraday_button = ttk.Button(
             intraday_custom,
             text="APPLY",
             style="Flyout.TButton",
             command=lambda: self._apply_custom_range("Intraday"),
-        ).pack(side=tk.LEFT)
+        )
+        self._set_tooltip(apply_intraday_button, "Apply the custom intraday date range and bar interval.")
+        apply_intraday_button.pack(side=tk.LEFT)
         historical_row = custom_intraday_row + 1
         ttk.Separator(panel, orient=tk.HORIZONTAL).grid(
             row=historical_row, column=0, columnspan=7, sticky=tk.EW, pady=(7, 5)
@@ -2434,6 +2997,7 @@ class MarketTerminalApp(tk.Tk):
                 command=lambda value=range_spec: self._choose_range(value, "Historical"),
             )
             button.grid(row=historical_row + 1, column=column, padx=2, pady=2)
+            self._set_tooltip(button, f"Switch the chart to the {range_spec.label} historical range.")
             button.bind("<Enter>", lambda _event: self._cancel_range_popup_hide())
             self.range_buttons.append((button, range_spec))
         historical_custom = ttk.Frame(panel, style="Panel.TFrame")
@@ -2454,12 +3018,14 @@ class MarketTerminalApp(tk.Tk):
         self._build_date_entry(historical_custom, self.historical_end_var).pack(
             side=tk.LEFT, padx=(4, 6)
         )
-        ttk.Button(
+        apply_historical_button = ttk.Button(
             historical_custom,
             text="APPLY DAILY",
             style="Flyout.TButton",
             command=lambda: self._apply_custom_range("Historical"),
-        ).pack(side=tk.LEFT)
+        )
+        self._set_tooltip(apply_historical_button, "Apply the custom historical daily date range.")
+        apply_historical_button.pack(side=tk.LEFT)
 
     def _build_date_entry(self, parent, variable: tk.StringVar) -> tk.Entry:
         return tk.Entry(
@@ -2511,6 +3077,11 @@ class MarketTerminalApp(tk.Tk):
                     command=lambda value=study: self._choose_technical_study(value),
                 )
                 button.grid(row=row, column=column, padx=2, pady=2)
+                if study is None:
+                    tooltip = "Show volume below the price chart."
+                else:
+                    tooltip = f"Show {text} technical study."
+                self._set_tooltip(button, tooltip)
                 button.bind("<Enter>", lambda _event: self._cancel_range_popup_hide())
                 self.technical_buttons.append((button, study))
 
@@ -2613,14 +3184,22 @@ class MarketTerminalApp(tk.Tk):
         self._update_series_tree()
 
     def _cycle_price_render_mode(self) -> None:
-        modes = ("line", "ohlc", "candle")
-        current_index = modes.index(self.price_render_mode)
-        self.price_render_mode = modes[(current_index + 1) % len(modes)]
-        self.price_render_button.configure(text=self._price_render_button_label())
+        current_index = PRICE_RENDER_MODES.index(self.price_render_mode)
+        self.price_render_mode = PRICE_RENDER_MODES[
+            (current_index + 1) % len(PRICE_RENDER_MODES)
+        ]
+        self._update_price_render_button()
         self._redraw_current_chart()
 
+    def _update_price_render_button(self) -> None:
+        self.price_render_button.configure(text=self._price_render_button_label())
+        self._set_tooltip(
+            self.price_render_button,
+            f"Chart type: {PRICE_RENDER_DESCRIPTIONS[self.price_render_mode]}. Click to cycle.",
+        )
+
     def _price_render_button_label(self) -> str:
-        return {"line": "L", "ohlc": "B", "candle": "K"}[self.price_render_mode]
+        return PRICE_RENDER_LABELS[self.price_render_mode]
 
     def _configure_series_tree_columns(self) -> None:
         if self.betas_comparison_var.get():
@@ -2734,6 +3313,8 @@ class MarketTerminalApp(tk.Tk):
             self._set_watchlist_search_result()
         elif self.add_to_compare_mode:
             self._add_search_result()
+        elif self.suggestion_anchor == self.event_search_entry:
+            self._open_event_search_result()
         else:
             self._open_search_result()
         return "break"
@@ -2759,8 +3340,18 @@ class MarketTerminalApp(tk.Tk):
         self._refresh_watchlist_item(item, instrument)
 
     def refresh_watchlist(self) -> None:
-        for item, instrument in list(self.watchlist_instruments.items()):
-            self._refresh_watchlist_item(item, instrument)
+        for after_id in self.watchlist_item_refresh_after_ids.values():
+            self.after_cancel(after_id)
+        self.watchlist_item_refresh_after_ids = {}
+        now = perf_counter()
+        for offset, (item, instrument) in enumerate(list(self.watchlist_instruments.items())):
+            if self.watchlist_next_refresh_at.get(item, 0.0) > now:
+                continue
+            after_id = self.after(
+                offset * WATCHLIST_REFRESH_STAGGER_MS,
+                lambda item=item, instrument=instrument: self._refresh_watchlist_item(item, instrument),
+            )
+            self.watchlist_item_refresh_after_ids[item] = after_id
 
     def refresh_macro_dashboard(self) -> None:
         category = self.macro_category_var.get()
@@ -2772,6 +3363,88 @@ class MarketTerminalApp(tk.Tk):
             self._update_macro_dashboard,
             "Macro request failed",
         )
+
+    def refresh_event_calendar(self) -> None:
+        if self.event_instrument is None:
+            self.event_status_var.set("Search or select a grouped watchlist stock to load events.")
+            return
+        self._load_event_calendar(self.event_instrument)
+
+    def _open_event_search_result(self) -> None:
+        instrument = self._selected_search_instrument()
+        if not instrument:
+            return
+        self._hide_suggestions()
+        self._open_event_calendar(instrument)
+
+    def _open_event_calendar(self, instrument: Instrument) -> None:
+        self.event_instrument = instrument
+        self.event_search_update_internal = True
+        try:
+            self.event_search_var.set(instrument.symbol)
+        finally:
+            self.event_search_update_internal = False
+        self._load_event_calendar(instrument)
+
+    def _load_event_calendar(self, instrument: Instrument) -> None:
+        self.event_request_id += 1
+        request_id = self.event_request_id
+        self.event_tree.delete(*self.event_tree.get_children())
+        self.event_status_var.set(f"Loading public events for {instrument.symbol} via Yahoo Finance...")
+        self._run_background(
+            lambda: self.provider.market_events(instrument),
+            lambda events: self._update_event_calendar(request_id, instrument, events),
+            "Event calendar request failed",
+            lambda: request_id == self.event_request_id,
+            lambda exc: self._show_event_calendar_error(request_id, instrument, exc),
+        )
+
+    def _update_event_calendar(
+        self,
+        request_id: int,
+        instrument: Instrument,
+        events: list[MarketEvent],
+    ) -> None:
+        if request_id != self.event_request_id:
+            return
+        self.event_tree.delete(*self.event_tree.get_children())
+        for index, event in enumerate(events):
+            local_date, local_time = market_event_local_date_time(event)
+            source_note = event.source
+            if event.note:
+                source_note = f"{source_note}: {event.note}"
+            self.event_tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    local_date,
+                    local_time,
+                    event.event,
+                    event.event_type,
+                    source_note,
+                ),
+                tags=(watchlist_row_stripe(index),),
+            )
+        if events:
+            self.event_status_var.set(
+                f"{instrument.symbol}: {len(events)} public event(s). Yahoo calendar coverage is best-effort."
+            )
+        else:
+            self.event_status_var.set(
+                f"{instrument.symbol}: no Yahoo public calendar events found."
+            )
+
+    def _show_event_calendar_error(
+        self,
+        request_id: int,
+        instrument: Instrument,
+        exc: Exception,
+    ) -> None:
+        if request_id != self.event_request_id:
+            return
+        detail = str(exc).strip() or exc.__class__.__name__
+        self.event_status_var.set(f"{instrument.symbol}: event calendar failed: {detail}")
 
     def _populate_macro_placeholders(self) -> None:
         category = self.macro_category_var.get()
@@ -2980,19 +3653,48 @@ class MarketTerminalApp(tk.Tk):
         self.portfolio_quote_tree = None
 
     def _save_watchlist_state(self) -> None:
+        self.watchlist_save_after_id = None
         rows = []
         for item in self.watchlist_tree.get_children():
-            instrument = self.watchlist_instruments.get(item)
-            rows.append(watchlist_row_from_instrument(instrument))
+            if item in self.watchlist_groups:
+                rows.append(watchlist_group_row(self.watchlist_groups[item]))
+            else:
+                instrument = self.watchlist_instruments.get(item)
+                row = watchlist_row_from_instrument(instrument)
+                if row:
+                    row["display_values"] = list(self.watchlist_tree.item(item, "values"))
+                rows.append(row)
         save_watchlist_state(self.watchlist_state_path, rows)
 
+    def _schedule_watchlist_state_save(self) -> None:
+        if self.watchlist_save_after_id:
+            self.after_cancel(self.watchlist_save_after_id)
+        self.watchlist_save_after_id = self.after(250, self._save_watchlist_state)
+
     def _schedule_watchlist_refresh_loop(self) -> None:
+        self.watchlist_refresh_after_id = None
         self.refresh_watchlist()
         self.watchlist_refresh_after_id = self.after(
             WATCHLIST_REFRESH_INTERVAL_MS, self._schedule_watchlist_refresh_loop
         )
 
+    def _pause_watchlist_refresh_for_priority(self) -> None:
+        if self.watchlist_refresh_after_id:
+            self.after_cancel(self.watchlist_refresh_after_id)
+            self.watchlist_refresh_after_id = None
+        for after_id in self.watchlist_item_refresh_after_ids.values():
+            self.after_cancel(after_id)
+        self.watchlist_item_refresh_after_ids = {}
+        self.watchlist_refresh_after_id = self.after(
+            WATCHLIST_PRIORITY_PAUSE_MS, self._schedule_watchlist_refresh_loop
+        )
+
     def _refresh_watchlist_item(self, item: str, instrument: Instrument) -> None:
+        self.watchlist_item_refresh_after_ids.pop(item, None)
+        if item not in self.watchlist_instruments:
+            return
+        if self.watchlist_next_refresh_at.get(item, 0.0) > perf_counter():
+            return
         if item in self.watchlist_quote_inflight:
             return
         self.watchlist_quote_inflight.add(item)
@@ -3031,6 +3733,13 @@ class MarketTerminalApp(tk.Tk):
                 direction_tag,
             ),
         )
+        if quote_allows_realtime_refresh(quote):
+            self.watchlist_next_refresh_at.pop(item, None)
+        else:
+            self.watchlist_next_refresh_at[item] = (
+                perf_counter() + WATCHLIST_CLOSED_REFRESH_INTERVAL_MS / 1000
+            )
+        self._schedule_watchlist_state_save()
         self._schedule_watchlist_tick_color_reset(item, quote, is_tick_flash)
 
     def _watchlist_tick_tag(self, item: str, quote) -> tuple[str, bool]:
@@ -3071,6 +3780,20 @@ class MarketTerminalApp(tk.Tk):
         self.watchlist_quote_inflight.discard(item)
         if item not in self.watchlist_instruments:
             return
+        self.watchlist_next_refresh_at[item] = (
+            perf_counter() + WATCHLIST_REFRESH_INTERVAL_MS / 1000
+        )
+        detail = str(exc).strip()[:18] or exc.__class__.__name__
+        current_values = list(self.watchlist_tree.item(item, "values"))
+        if len(current_values) == len(WATCHLIST_COLUMNS) and any(current_values[1:6]):
+            current_values[-1] = detail
+            self.watchlist_tree.item(
+                item,
+                values=tuple(current_values),
+                tags=watchlist_item_tags(self.watchlist_tree.index(item), "tick_error"),
+            )
+            self._schedule_watchlist_state_save()
+            return
         self.watchlist_tree.item(
             item,
             values=(
@@ -3080,10 +3803,11 @@ class MarketTerminalApp(tk.Tk):
                 "",
                 "",
                 "",
-                str(exc).strip()[:18] or exc.__class__.__name__,
+                detail,
             ),
             tags=watchlist_item_tags(self.watchlist_tree.index(item), "tick_error"),
         )
+        self._schedule_watchlist_state_save()
 
     def _open_search_result(self) -> None:
         instrument = self._selected_search_instrument()
@@ -3289,6 +4013,9 @@ class MarketTerminalApp(tk.Tk):
         self.selected_instrument = primary
         self.current_frames = visible_frames
         self.current_frame = visible_frames[primary.symbol]
+        if self.chart_group_var.get() == self.event_group_var.get():
+            if self.event_instrument is None or self.event_instrument.symbol != primary.symbol:
+                self._open_event_calendar(primary)
         if session is not None:
             self.current_session = session
         self._update_beta_model()
@@ -3344,6 +4071,8 @@ class MarketTerminalApp(tk.Tk):
         self._configure_dates(range_spec)
         self._apply_full_date_bounds()
         self._apply_full_price_bounds()
+        self._draw_latest_value_markers(frame, self._selected_period_change_color(frame))
+        self._apply_chart_font()
         self.canvas.draw_idle()
         sources = sorted(
             {
@@ -3482,35 +4211,83 @@ class MarketTerminalApp(tk.Tk):
         filings.bind("<Double-1>", lambda _event: open_selected_filing())
         actions = ttk.Frame(window, padding=(12, 0, 12, 12))
         actions.pack(fill=tk.X)
-        ttk.Button(
+        clear_cache_button = ttk.Button(
             actions,
             text="CLEAR SEC CACHE",
             style="Chip.TButton",
             command=clear_sec_cache,
-        ).pack(side=tk.LEFT)
-        ttk.Button(
+        )
+        self._set_tooltip(clear_cache_button, "Clear cached SEC data and fetch fresh data next time.")
+        clear_cache_button.pack(side=tk.LEFT)
+        open_filing_button = ttk.Button(
             actions,
             text="OPEN SELECTED FILING",
             style="Accent.TButton",
             command=open_selected_filing,
-        ).pack(side=tk.RIGHT)
+        )
+        self._set_tooltip(open_filing_button, "Open the selected SEC filing in your browser.")
+        open_filing_button.pack(side=tk.RIGHT)
 
     def _draw_primary_price_series(self, frame: pd.DataFrame, symbol: str, color: str) -> None:
-        if self.price_render_mode == "ohlc" and {"High", "Low"}.issubset(frame.columns):
-            self._draw_high_low_bars(frame, symbol)
+        ohlc_columns = {"Open", "High", "Low", "Close"}
+        hlc_columns = {"High", "Low", "Close"}
+        if self.price_render_mode == "bars" and ohlc_columns.issubset(frame.columns):
+            self._draw_ohlc_bars(frame, symbol, color)
             return
-        if self.price_render_mode == "candle" and {"Open", "High", "Low", "Close"}.issubset(frame.columns):
-            self._draw_candles(frame, symbol)
+        if self.price_render_mode == "candles" and ohlc_columns.issubset(frame.columns):
+            self._draw_candles(frame, symbol, color, hollow=False)
             return
+        if self.price_render_mode == "hollow_candles" and ohlc_columns.issubset(frame.columns):
+            self._draw_candles(frame, symbol, color, hollow=True)
+            return
+        if self.price_render_mode == "hlc_bars" and hlc_columns.issubset(frame.columns):
+            self._draw_high_low_close_bars(frame, symbol, color)
+            return
+        if self.price_render_mode == "step_line":
+            drawstyle = "steps-post"
+            marker = None
+        else:
+            drawstyle = "default"
+            marker = "o" if self.price_render_mode == "line_markers" else None
         self.price_axis.plot(
             frame.index,
             frame["Close"],
             color=color,
             linewidth=1.5,
-            label=symbol,
+            marker=marker,
+            markersize=3.2 if marker else None,
+            drawstyle=drawstyle,
+            label=self._primary_legend_label(symbol),
         )
 
-    def _draw_high_low_bars(self, frame: pd.DataFrame, symbol: str) -> None:
+    def _primary_legend_label(self, symbol: str) -> str:
+        return f"{symbol} | {PRICE_RENDER_DESCRIPTIONS.get(self.price_render_mode, 'price')}"
+
+    def _draw_ohlc_bars(self, frame: pd.DataFrame, symbol: str, color: str) -> None:
+        data = frame[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna()
+        if data.empty:
+            return
+        width = _bar_width(data) * 0.35
+        x_values = mdates.date2num(data.index.to_pydatetime())
+        colors = [UP if row["Close"] >= row["Open"] else DOWN for _, row in data.iterrows()]
+        self.price_axis.vlines(data.index, data["Low"], data["High"], color=colors, linewidth=0.9)
+        self.price_axis.hlines(
+            data["Open"],
+            x_values - width,
+            x_values,
+            color=colors,
+            linewidth=1.0,
+        )
+        self.price_axis.hlines(
+            data["Close"],
+            x_values,
+            x_values + width,
+            color=colors,
+            linewidth=1.0,
+        )
+        self.price_axis.plot([], [], color=color, linewidth=1.4, label=self._primary_legend_label(symbol))
+
+    def _draw_high_low_close_bars(self, frame: pd.DataFrame, symbol: str, color: str) -> None:
         data = frame[["High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna()
         if data.empty:
             return
@@ -3521,36 +4298,118 @@ class MarketTerminalApp(tk.Tk):
             data["Close"],
             x_values - width / 2,
             x_values + width / 2,
-            color=ORANGE,
+            color=color,
             linewidth=1.0,
-            label=symbol,
+            label=self._primary_legend_label(symbol),
         )
 
-    def _draw_candles(self, frame: pd.DataFrame, symbol: str) -> None:
+    def _draw_candles(self, frame: pd.DataFrame, symbol: str, color: str, hollow: bool) -> None:
         data = frame[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna()
         if data.empty:
             return
         width = _bar_width(data) * 0.55
-        self.price_axis.vlines(data.index, data["Low"], data["High"], color=MUTED, linewidth=0.8)
         for timestamp, row in data.iterrows():
             open_price = float(row["Open"])
             close_price = float(row["Close"])
+            candle_color = UP if close_price >= open_price else DOWN
+            self.price_axis.vlines(
+                timestamp,
+                row["Low"],
+                row["High"],
+                color=candle_color if hollow else MUTED,
+                linewidth=0.8,
+            )
             low = min(open_price, close_price)
             height = max(abs(close_price - open_price), 1e-9)
-            color = UP if close_price >= open_price else DOWN
+            facecolor = PANEL if hollow and close_price >= open_price else candle_color
             left = mdates.date2num(timestamp) - width / 2
             self.price_axis.add_patch(
                 Rectangle(
                     (left, low),
                     width,
                     height,
-                    facecolor=color,
-                    edgecolor=color,
+                    facecolor=facecolor,
+                    edgecolor=candle_color,
                     linewidth=0.7,
-                    alpha=0.82,
+                    alpha=1.0 if hollow else 0.82,
                 )
             )
-        self.price_axis.plot([], [], color=ORANGE, label=symbol)
+        self.price_axis.plot([], [], color=color, linewidth=1.4, label=self._primary_legend_label(symbol))
+
+    def _selected_period_change_color(self, frame: pd.DataFrame) -> str:
+        closes = pd.to_numeric(frame.get("Close", pd.Series(dtype=float)), errors="coerce").dropna()
+        if len(closes) < 2:
+            return MUTED
+        change = float(closes.iloc[-1] - closes.iloc[0])
+        if change > 0:
+            return UP
+        if change < 0:
+            return DOWN
+        return MUTED
+
+    def _draw_latest_value_markers(self, frame: pd.DataFrame, color: str) -> None:
+        closes = pd.to_numeric(frame.get("Close", pd.Series(dtype=float)), errors="coerce").dropna()
+        if closes.empty:
+            return
+        latest_close = float(closes.iloc[-1])
+        self.price_axis.axhline(
+            latest_close,
+            color=color,
+            linewidth=0.85,
+            linestyle="-",
+            alpha=0.72,
+            zorder=1,
+        )
+        self.price_axis.annotate(
+            format_quote_value(latest_close),
+            xy=(1.01, latest_close),
+            xycoords=("axes fraction", "data"),
+            xytext=(0, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            color=BG,
+            fontsize=8,
+            fontweight="bold",
+            annotation_clip=False,
+            clip_on=False,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": color,
+                "edgecolor": color,
+                "linewidth": 0.0,
+                "alpha": 0.95,
+            },
+            zorder=6,
+        )
+        if "Volume" not in frame.columns:
+            return
+        volumes = pd.to_numeric(frame["Volume"], errors="coerce").dropna()
+        if volumes.empty:
+            return
+        latest_volume = float(volumes.iloc[-1])
+        self.volume_axis.annotate(
+            format_volume_value(latest_volume),
+            xy=(1.01, latest_volume),
+            xycoords=("axes fraction", "data"),
+            xytext=(0, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            color=BG,
+            fontsize=8,
+            fontweight="bold",
+            annotation_clip=False,
+            clip_on=False,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": color,
+                "edgecolor": color,
+                "linewidth": 0.0,
+                "alpha": 0.95,
+            },
+            zorder=6,
+        )
 
     def _draw_lower_panel(self, frame: pd.DataFrame, symbol: str) -> None:
         if {"BuyCashEUR", "SellCashEUR"}.issubset(frame.columns):
@@ -3715,14 +4574,13 @@ class MarketTerminalApp(tk.Tk):
         if (
             event.inaxes != self.price_axis
             or event.xdata is None
+            or event.ydata is None
             or not self.current_frames
             or self.measurement_mode
         ):
             self._hide_hover()
             return
-        displayed = displayed_close_series(self.current_frames, self.display_mode_var.get())
-        timestamp, values = nearest_displayed_values(displayed, event.xdata)
-        self._draw_hover(timestamp, values)
+        self._draw_crosshair_hover(event.xdata, event.ydata)
 
     def _series_display_color(self, symbol: str, position: int) -> str:
         fallback = SERIES_COLORS[position % len(SERIES_COLORS)]
@@ -3759,6 +4617,65 @@ class MarketTerminalApp(tk.Tk):
             zorder=8,
         )
         self.hover_artists.append(tooltip)
+        self.canvas.draw_idle()
+
+    def _draw_crosshair_hover(self, x_position: float, y_position: float) -> None:
+        self._clear_hover()
+        timestamp = mdates.num2date(x_position)
+        vertical = self.price_axis.axvline(
+            x_position, color=MUTED, linewidth=0.8, linestyle="--", alpha=0.86, zorder=5
+        )
+        horizontal = self.price_axis.axhline(
+            y_position, color=MUTED, linewidth=0.8, linestyle="--", alpha=0.86, zorder=5
+        )
+        self.hover_artists.extend([vertical, horizontal])
+        price_label = self.price_axis.annotate(
+            format_quote_value(float(y_position)),
+            xy=(1.01, y_position),
+            xycoords=("axes fraction", "data"),
+            xytext=(0, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            color=BG,
+            fontsize=8,
+            fontweight="bold",
+            fontfamily=TERMINAL_FONT_FAMILY,
+            annotation_clip=False,
+            clip_on=False,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": ORANGE,
+                "edgecolor": ORANGE,
+                "linewidth": 0.0,
+                "alpha": 0.95,
+            },
+            zorder=8,
+        )
+        time_label = self.volume_axis.annotate(
+            self._format_chart_time(pd.Timestamp(timestamp)),
+            xy=(x_position, -0.03),
+            xycoords=("data", "axes fraction"),
+            xytext=(0, 0),
+            textcoords="offset points",
+            ha="center",
+            va="top",
+            color=BG,
+            fontsize=8,
+            fontweight="bold",
+            fontfamily=TERMINAL_FONT_FAMILY,
+            annotation_clip=False,
+            clip_on=False,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": ORANGE,
+                "edgecolor": ORANGE,
+                "linewidth": 0.0,
+                "alpha": 0.95,
+            },
+            zorder=8,
+        )
+        self.hover_artists.extend([price_label, time_label])
         self.canvas.draw_idle()
 
     def _draw_volume_hover(self, x_position: float) -> None:
@@ -3879,7 +4796,20 @@ class MarketTerminalApp(tk.Tk):
     def _apply_full_price_bounds(self) -> None:
         if not self.current_frames:
             return
-        displayed = displayed_close_series(self.current_frames, self.display_mode_var.get())
+        if (
+            self.display_mode_var.get() == "Prices"
+            and len(self.current_frames) == 1
+            and self.price_render_mode in {"bars", "candles", "hollow_candles", "hlc_bars"}
+        ):
+            frame = next(iter(self.current_frames.values()))
+            columns = [column for column in ("Low", "High", "Close") if column in frame.columns]
+            displayed = {
+                "primary": pd.concat(
+                    [pd.to_numeric(frame[column], errors="coerce") for column in columns]
+                )
+            }
+        else:
+            displayed = displayed_close_series(self.current_frames, self.display_mode_var.get())
         lower, upper = comparison_price_bounds(displayed)
         self.price_axis.set_ylim(lower, upper)
 
@@ -4001,7 +4931,7 @@ class MarketTerminalApp(tk.Tk):
         for label in self.volume_axis.get_xticklabels():
             label.set_rotation(0)
             label.set_ha("center")
-        self.figure.subplots_adjust(left=0.055, right=0.985, top=0.985, bottom=0.085)
+        self.figure.subplots_adjust(left=0.035, right=0.905, top=0.985, bottom=0.085)
 
     def _clear_chart(self, text: str) -> None:
         self.current_frame = pd.DataFrame()
@@ -4030,16 +4960,39 @@ class MarketTerminalApp(tk.Tk):
         for axis in (self.price_axis, self.volume_axis):
             axis.set_facecolor(BG)
             axis.tick_params(colors=MUTED, labelsize=9)
+            axis.yaxis.tick_right()
+            axis.yaxis.set_label_position("right")
+            axis.xaxis.label.set_fontfamily(TERMINAL_FONT_FAMILY)
+            axis.yaxis.label.set_fontfamily(TERMINAL_FONT_FAMILY)
             axis.grid(True, color=GRID, linewidth=0.55, alpha=0.8)
             for spine in axis.spines.values():
                 spine.set_color(GRID)
+            axis.spines["left"].set_visible(False)
+            axis.spines["right"].set_visible(True)
         self.study_axis.set_visible(False)
         self.study_axis.tick_params(colors=ORANGE, labelsize=9)
+        self.study_axis.xaxis.label.set_fontfamily(TERMINAL_FONT_FAMILY)
+        self.study_axis.yaxis.label.set_fontfamily(TERMINAL_FONT_FAMILY)
         self.study_axis.spines["right"].set_color(ORANGE)
         for spine_name in ("left", "top", "bottom"):
             self.study_axis.spines[spine_name].set_visible(False)
         self.study_axis.grid(False)
         self.price_axis.tick_params(labelbottom=False)
+        self._apply_chart_font()
+
+    def _apply_chart_font(self) -> None:
+        for axis in (self.price_axis, self.volume_axis, self.study_axis):
+            axis.title.set_fontfamily(TERMINAL_FONT_FAMILY)
+            axis.xaxis.label.set_fontfamily(TERMINAL_FONT_FAMILY)
+            axis.yaxis.label.set_fontfamily(TERMINAL_FONT_FAMILY)
+            for label in (*axis.get_xticklabels(), *axis.get_yticklabels()):
+                label.set_fontfamily(TERMINAL_FONT_FAMILY)
+            for text in axis.texts:
+                text.set_fontfamily(TERMINAL_FONT_FAMILY)
+            legend = axis.get_legend()
+            if legend is not None:
+                for text in legend.get_texts():
+                    text.set_fontfamily(TERMINAL_FONT_FAMILY)
 
     def _run_background(
         self,
@@ -4115,6 +5068,13 @@ def load_window_state(path: Path) -> dict[str, str]:
 
 
 def load_watchlist_state(path: Path) -> list[dict]:
+    rows = _load_watchlist_state_file(path)
+    if rows:
+        return rows
+    return _load_watchlist_state_file(path.with_suffix(path.suffix + ".bak"))
+
+
+def _load_watchlist_state_file(path: Path) -> list[dict]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -4154,6 +5114,14 @@ def window_layout_state(widget: tk.Widget) -> dict[str, int | bool]:
 
 def save_watchlist_state(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            path.with_suffix(path.suffix + ".bak").write_text(
+                path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 
@@ -4174,7 +5142,36 @@ def watchlist_row_from_instrument(instrument: Instrument | None) -> dict:
     }
 
 
+def watchlist_group_row(name: str) -> dict:
+    normalized = " ".join(name.strip().split())
+    return {"type": "group", "name": normalized} if normalized else {}
+
+
+def watchlist_group_name(row: dict) -> str:
+    if row.get("type") != "group":
+        return ""
+    return " ".join(str(row.get("name", "")).strip().split())
+
+
+def watchlist_group_label(name: str) -> str:
+    return f"[ {name.upper()} ]"
+
+
+def watchlist_display_values(row: dict, instrument: Instrument | None) -> tuple[str, ...]:
+    if instrument is None:
+        return ("", "", "", "", "", "", "")
+    values = row.get("display_values")
+    if isinstance(values, list):
+        normalized = [str(value) for value in values[: len(WATCHLIST_COLUMNS)]]
+        normalized.extend([""] * (len(WATCHLIST_COLUMNS) - len(normalized)))
+        if normalized and normalized[0].strip():
+            return tuple(normalized)
+    return (watchlist_asset_label(instrument), "Loading", "", "", "", "", "")
+
+
 def instrument_from_watchlist_row(row: dict) -> Instrument | None:
+    if row.get("type") == "group":
+        return None
     symbol = str(row.get("symbol", "")).strip()
     if not symbol:
         return None
@@ -4547,6 +5544,18 @@ def format_quote_value(value: float | None) -> str:
     return f"{value:,.2f}"
 
 
+def market_event_local_date_time(event: MarketEvent) -> tuple[str, str]:
+    if event.timestamp is None:
+        return "", "N/A"
+    timestamp = pd.Timestamp(event.timestamp)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    local_timestamp = timestamp.tz_convert(datetime.now().astimezone().tzinfo)
+    date_text = local_timestamp.strftime("%Y-%m-%d")
+    time_text = "Date only" if event.is_date_only else local_timestamp.strftime("%H:%M")
+    return date_text, time_text
+
+
 def format_bid_ask_value(value: float | None, quote, side: str) -> str:
     if value is not None:
         return format_quote_value(value)
@@ -4557,6 +5566,16 @@ def format_bid_ask_value(value: float | None, quote, side: str) -> str:
     if other is None and quote.last is not None:
         return "MKT CLOSED"
     return ""
+
+
+def quote_allows_realtime_refresh(quote) -> bool:
+    state = str(getattr(quote, "market_state", "") or "").upper().replace("_", " ")
+    if not state:
+        return True
+    if "CLOSED" in state:
+        return False
+    refreshable_states = {"REGULAR", "OPEN", "PRE", "POST", "PRE MARKET", "POST MARKET"}
+    return state in refreshable_states
 
 
 def format_quote_change(change: float | None, change_percent: float | None = None) -> str:

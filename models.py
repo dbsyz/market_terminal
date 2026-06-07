@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,16 @@ class QuoteSnapshot:
     change_percent: float | None = None
     volume: float | None = None
     market_state: str = ""
+
+
+@dataclass(frozen=True)
+class MarketEvent:
+    timestamp: datetime | None
+    event: str
+    event_type: str
+    source: str = "Yahoo Finance"
+    note: str = ""
+    is_date_only: bool = False
 
 
 INTRADAY_MATRIX = (
