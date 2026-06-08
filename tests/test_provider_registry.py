@@ -28,10 +28,16 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertIn("gdelt", [spec.provider_id for spec in specs])
         self.assertIn("nasdaq_calendar", [spec.provider_id for spec in specs])
         self.assertIn("nfin", [spec.provider_id for spec in specs])
+        self.assertIn("kraken", [spec.provider_id for spec in specs])
+        self.assertIn("coinbase", [spec.provider_id for spec in specs])
+        self.assertIn("alpaca_iex", [spec.provider_id for spec in specs])
+        self.assertIn("finnhub", [spec.provider_id for spec in specs])
         self.assertIn("exchange_calendars", [spec.provider_id for spec in specs])
         self.assertTrue(next(spec for spec in specs if spec.provider_id == "sec_edgar").implemented)
         self.assertTrue(next(spec for spec in specs if spec.provider_id == "gdelt").implemented)
         self.assertTrue(next(spec for spec in specs if spec.provider_id == "nfin").implemented)
+        self.assertTrue(next(spec for spec in specs if spec.provider_id == "kraken").implemented)
+        self.assertTrue(next(spec for spec in specs if spec.provider_id == "coinbase").implemented)
 
     def test_marks_keyless_openfigi_as_limited_not_disabled(self) -> None:
         with patch.dict(os.environ, {"OPENFIGI_API_KEY": ""}, clear=False):
@@ -41,11 +47,23 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertTrue(health["openfigi"].configured)
 
     def test_marks_optional_keyed_providers_as_missing_key(self) -> None:
-        with patch.dict(os.environ, {"TWELVE_DATA_API_KEY": "", "STOOQ_API_KEY": ""}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "TWELVE_DATA_API_KEY": "",
+                "STOOQ_API_KEY": "",
+                "FINNHUB_API_KEY": "",
+                "ALPACA_API_KEY_ID": "",
+                "ALPACA_API_SECRET_KEY": "",
+            },
+            clear=False,
+        ):
             health = _health_by_id()
 
         self.assertEqual(health["twelve_data"].status, STATUS_MISSING_KEY)
         self.assertEqual(health["stooq"].status, STATUS_MISSING_KEY)
+        self.assertEqual(health["finnhub"].status, STATUS_MISSING_KEY)
+        self.assertEqual(health["alpaca_iex"].status, STATUS_MISSING_KEY)
 
     def test_marks_optional_keyed_provider_as_ready_when_env_is_set(self) -> None:
         with patch.dict(os.environ, {"TWELVE_DATA_API_KEY": "key"}, clear=False):
@@ -80,7 +98,6 @@ class ProviderRegistryTests(unittest.TestCase):
 
         self.assertEqual(health["ecb"].status, STATUS_PLANNED)
         self.assertEqual(health["nasdaq_calendar"].status, STATUS_PLANNED)
-        self.assertEqual(health["finnhub"].status, STATUS_PLANNED)
         self.assertEqual(health["fmp"].status, STATUS_PLANNED)
         self.assertEqual(health["eodhd"].status, STATUS_PLANNED)
         self.assertEqual(health["stockdata"].status, STATUS_PLANNED)

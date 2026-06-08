@@ -53,6 +53,9 @@ class QuoteSnapshot:
     change_percent: float | None = None
     volume: float | None = None
     market_state: str = ""
+    source: str = ""
+    source_detail: str = ""
+    as_of: datetime | None = None
 
 
 @dataclass(frozen=True)

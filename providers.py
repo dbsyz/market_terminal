@@ -14,6 +14,7 @@ import requests
 import yfinance as yf
 import yfinance.cache as yf_cache
 
+from .live_quotes import LiveQuoteService
 from .models import Instrument, MarketEvent, MarketSession, QuoteSnapshot, RangeSpec
 from .portfolio_index import (
     PORTFOLIO_INDEX_SYMBOL,
@@ -454,6 +455,8 @@ class BinanceSpotClient:
             change_percent=_as_optional_float(payload.get("priceChangePercent")),
             volume=_as_optional_float(payload.get("volume")),
             market_state="OPEN - 24/7 CRYPTO",
+            source="Binance Spot",
+            source_detail="Public 24h ticker snapshot",
         )
 
     def _klines(self, symbol: str, interval: str, range_spec: RangeSpec) -> list[list]:
@@ -491,6 +494,7 @@ class MarketDataProvider:
     market_session_ttl_seconds = 300.0
     quote_info_ttl_seconds = 60.0
     quote_snapshot_ttl_seconds = 20.0
+    live_quote_snapshot_ttl_seconds = 2.0
     yahoo_min_request_interval_seconds = 0.75
 
     def __init__(
@@ -500,6 +504,7 @@ class MarketDataProvider:
         stooq: StooqClient | None = None,
         binance: BinanceSpotClient | None = None,
         nfin: NfinCalendarClient | None = None,
+        live_quotes: LiveQuoteService | None = None,
     ) -> None:
         configure_yfinance_cache()
         self.figi = figi or OpenFigiClient()
@@ -507,6 +512,7 @@ class MarketDataProvider:
         self.stooq = stooq or StooqClient()
         self.binance = binance or BinanceSpotClient()
         self.nfin = nfin or NfinCalendarClient()
+        self.live_quotes = live_quotes or LiveQuoteService()
         self._yahoo_lock = Lock()
         self._last_yahoo_request_at = 0.0
         self._history_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
@@ -820,9 +826,20 @@ class MarketDataProvider:
                 change_percent=change_percent,
                 volume=volume,
                 market_state="LOCAL INDEX",
+                source="Local portfolio index",
+                source_detail="Generated local portfolio monitor",
             )
             self._store_quote_snapshot(instrument, include_slow_info, quote)
             return quote
+        live_quotes = getattr(self, "live_quotes", None)
+        if live_quotes is not None:
+            try:
+                quote = live_quotes.quote_snapshot(instrument)
+            except Exception:
+                quote = None
+            if quote is not None:
+                self._store_quote_snapshot(instrument, include_slow_info, quote)
+                return quote
         binance = getattr(self, "binance", None)
         if binance is not None and binance.enabled and binance_symbol_from_instrument(instrument):
             try:
@@ -887,6 +904,8 @@ class MarketDataProvider:
                 info,
                 ("market_state", "marketState"),
             ),
+            source="Yahoo Finance",
+            source_detail="yfinance fast_info/info fallback",
         )
         self._store_quote_snapshot(instrument, include_slow_info, quote)
         return quote
@@ -1020,7 +1039,7 @@ class MarketDataProvider:
             cache = {}
             self._quote_snapshot_cache = cache
         cached = cache.get((instrument.symbol.upper(), include_slow_info))
-        if cached and monotonic() - cached[0] < self.quote_snapshot_ttl_seconds:
+        if cached and monotonic() - cached[0] < self._quote_snapshot_ttl(cached[1]):
             return cached[1]
         return None
 
@@ -1032,6 +1051,12 @@ class MarketDataProvider:
             cache = {}
             self._quote_snapshot_cache = cache
         cache[(instrument.symbol.upper(), include_slow_info)] = (monotonic(), quote)
+
+    def _quote_snapshot_ttl(self, quote: QuoteSnapshot) -> float:
+        source = str(getattr(quote, "source", "") or "")
+        if source and source not in {"Yahoo Finance", "Local portfolio index"}:
+            return self.live_quote_snapshot_ttl_seconds
+        return self.quote_snapshot_ttl_seconds
 
     def _quote_info(self, symbol: str, ticker, include_slow_info: bool) -> dict:
         cache = getattr(self, "_quote_info_cache", None)

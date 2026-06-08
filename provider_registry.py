@@ -50,11 +50,29 @@ IMPLEMENTED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="binance",
         name="Binance Spot public API",
-        features=("crypto_history", "crypto_quotes"),
+        features=("crypto_history", "crypto_quotes", "live_crypto_quotes"),
         asset_classes=("crypto",),
         docs_url="https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md",
         implemented=True,
         notes="Preferred source for Binance-listed spot crypto pairs; no key for public market data, but access can be geographically restricted.",
+    ),
+    ProviderSpec(
+        provider_id="kraken",
+        name="Kraken public market data",
+        features=("live_crypto_quotes",),
+        asset_classes=("crypto",),
+        docs_url="https://docs.kraken.com/api/docs/rest-api/get-ticker-information/",
+        implemented=True,
+        notes="No-key crypto live snapshot fallback for Kraken-listed pairs; exchange-specific rather than consolidated crypto market data.",
+    ),
+    ProviderSpec(
+        provider_id="coinbase",
+        name="Coinbase Exchange public market data",
+        features=("live_crypto_quotes",),
+        asset_classes=("crypto",),
+        docs_url="https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductticker",
+        implemented=True,
+        notes="No-key crypto live snapshot fallback for major Coinbase products; exchange-specific rather than consolidated crypto market data.",
     ),
     ProviderSpec(
         provider_id="openfigi",
@@ -69,7 +87,7 @@ IMPLEMENTED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="twelve_data",
         name="Twelve Data",
-        features=("search", "history"),
+        features=("search", "history", "live_quotes"),
         asset_classes=("equities", "etfs", "indices", "fx", "crypto"),
         docs_url="https://twelvedata.com/docs",
         implemented=True,
@@ -127,12 +145,32 @@ IMPLEMENTED_PROVIDER_SPECS = (
     ProviderSpec(
         provider_id="nfin",
         name="nfin Nasdaq API",
-        features=("earnings_calendar", "ipo_calendar", "dividends", "splits"),
+        features=("earnings_calendar", "ipo_calendar", "dividends", "splits", "live_us_quotes"),
         asset_classes=("us_equities",),
         docs_url="https://nfin.dev/",
         implemented=True,
         credential_env="NFIN_API_KEY",
-        notes="No-key Nasdaq calendar enrichment source; anonymous access is usable but IP-rate-limited.",
+        notes="No-key Nasdaq calendar and US quote enrichment source; anonymous access is usable but IP-rate-limited.",
+    ),
+    ProviderSpec(
+        provider_id="alpaca_iex",
+        name="Alpaca Basic IEX market data",
+        features=("live_us_quotes",),
+        asset_classes=("us_equities", "etfs"),
+        docs_url="https://docs.alpaca.markets/docs/real-time-stock-pricing-data",
+        implemented=True,
+        credential_env="ALPACA_API_KEY_ID",
+        notes="Optional free-account IEX quote/trade source. Not consolidated SIP; label as IEX-only.",
+    ),
+    ProviderSpec(
+        provider_id="finnhub",
+        name="Finnhub",
+        features=("live_quotes",),
+        asset_classes=("equities", "etfs", "fx", "crypto"),
+        docs_url="https://finnhub.io/docs/api/quote",
+        implemented=True,
+        credential_env="FINNHUB_API_KEY",
+        notes="Optional free-key quote source; free-tier limits and symbol coverage need monitoring.",
     ),
 )
 
@@ -155,16 +193,6 @@ PLANNED_PROVIDER_SPECS = (
         docs_url="https://github.com/s-kerin/finance_calendars",
         implemented=False,
         notes="Candidate event-calendar source via public NASDAQ endpoints/wrappers; reverse-engineered access must stay best-effort and clearly attributed.",
-    ),
-    ProviderSpec(
-        provider_id="finnhub",
-        name="Finnhub",
-        features=("earnings_calendar", "company_news", "fundamentals"),
-        asset_classes=("equities", "news"),
-        docs_url="https://finnhub.io/docs/api",
-        implemented=False,
-        credential_env="FINNHUB_API_KEY",
-        notes="Free API key advertised; endpoint availability and terms need validation before enabling by default.",
     ),
     ProviderSpec(
         provider_id="fmp",
@@ -245,6 +273,14 @@ def _provider_health(spec: ProviderSpec) -> ProviderHealth:
         if os.getenv("BINANCE_DISABLE", "0") == "1":
             return ProviderHealth(spec, STATUS_LIMITED, "Disabled by BINANCE_DISABLE=1.")
         return ProviderHealth(spec, STATUS_READY, "No project API key required for public spot market data.")
+    if spec.provider_id == "kraken":
+        if os.getenv("KRAKEN_DISABLE", "0") == "1":
+            return ProviderHealth(spec, STATUS_LIMITED, "Disabled by KRAKEN_DISABLE=1.")
+        return ProviderHealth(spec, STATUS_READY, "No project API key required for public spot market data.")
+    if spec.provider_id == "coinbase":
+        if os.getenv("COINBASE_DISABLE", "0") == "1":
+            return ProviderHealth(spec, STATUS_LIMITED, "Disabled by COINBASE_DISABLE=1.")
+        return ProviderHealth(spec, STATUS_READY, "No project API key required for public exchange market data.")
     if spec.provider_id == "openfigi":
         if _has_env_value(spec.credential_env):
             return ProviderHealth(spec, STATUS_READY, f"{spec.credential_env} is configured.")
@@ -285,6 +321,14 @@ def _provider_health(spec: ProviderSpec) -> ProviderHealth:
             spec,
             STATUS_LIMITED,
             "Anonymous no-key access is active; set NFIN_API_KEY for higher limits.",
+        )
+    if spec.provider_id == "alpaca_iex":
+        if _has_env_value("ALPACA_API_KEY_ID") and _has_env_value("ALPACA_API_SECRET_KEY"):
+            return ProviderHealth(spec, STATUS_READY, "Alpaca Basic IEX credentials are configured.")
+        return ProviderHealth(
+            spec,
+            STATUS_MISSING_KEY,
+            "Set ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY to enable.",
         )
     if spec.credential_env and not _has_env_value(spec.credential_env):
         return ProviderHealth(spec, STATUS_MISSING_KEY, f"Set {spec.credential_env} to enable.")

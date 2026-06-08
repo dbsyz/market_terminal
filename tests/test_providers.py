@@ -7,6 +7,16 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import market_terminal.portfolio_index as portfolio_index
+from market_terminal.live_quotes import (
+    BinanceLiveQuoteClient,
+    CoinbaseLiveQuoteClient,
+    KrakenLiveQuoteClient,
+    LiveQuoteService,
+    NfinLiveQuoteClient,
+    coinbase_product_from_instrument,
+    is_crypto_instrument,
+    kraken_pair_from_instrument,
+)
 from market_terminal.models import HISTORICAL_RANGES, INTRADAY_RANGES, Instrument, MarketEvent, RangeSpec
 from market_terminal.models import QuoteSnapshot
 from market_terminal.portfolio_index import _first_trade_date, build_portfolio_monitor_report, portfolio_index_files
@@ -65,6 +75,17 @@ class IdentifierDetectionTests(unittest.TestCase):
         self.assertEqual(nfin_symbol_from_instrument(Instrument("KRW.PA", "Amundi")), "")
         self.assertEqual(nfin_symbol_from_instrument(Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")), "")
 
+    def test_live_crypto_detection_does_not_misclassify_dash_equities(self) -> None:
+        self.assertTrue(is_crypto_instrument(Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")))
+        self.assertTrue(is_crypto_instrument(Instrument("ETHUSDT", "Ether", exchange="Binance")))
+        self.assertFalse(is_crypto_instrument(Instrument("BRK-B", "Berkshire Hathaway")))
+        self.assertFalse(is_crypto_instrument(Instrument("AAPL", "Apple")))
+
+    def test_crypto_exchange_symbol_helpers(self) -> None:
+        bitcoin = Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")
+        self.assertEqual(kraken_pair_from_instrument(bitcoin), "XBTUSD")
+        self.assertEqual(coinbase_product_from_instrument(bitcoin), "BTC-USD")
+
 
 class StubResponse:
     def raise_for_status(self) -> None:
@@ -117,6 +138,16 @@ class GetSession:
         return self.response
 
 
+class FlexibleGetSession:
+    def __init__(self, response) -> None:
+        self.response = response
+        self.requests = []
+
+    def get(self, endpoint, **kwargs):
+        self.requests.append((endpoint, kwargs))
+        return self.response
+
+
 class NfinSession:
     def __init__(self, payloads) -> None:
         self.payloads = payloads
@@ -140,6 +171,140 @@ class OpenFigiTests(unittest.TestCase):
         self.assertEqual(instruments[0].isin, "US0378331005")
         self.assertEqual(session.request[1], [{"idType": "ID_ISIN", "idValue": "US0378331005"}])
         self.assertEqual(session.request[2]["X-OPENFIGI-APIKEY"], "key")
+
+
+class LiveQuoteTests(unittest.TestCase):
+    def test_binance_live_quote_parses_public_ticker(self) -> None:
+        session = FlexibleGetSession(
+            RequestResponse(
+                {
+                    "lastPrice": "101.0",
+                    "bidPrice": "100.9",
+                    "askPrice": "101.1",
+                    "priceChange": "1.0",
+                    "priceChangePercent": "1.0",
+                    "volume": "12.5",
+                    "closeTime": 1_775_000_000_000,
+                }
+            )
+        )
+
+        quote = BinanceLiveQuoteClient(session=session).quote_snapshot(
+            Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")
+        )
+
+        self.assertEqual(quote.last, 101.0)
+        self.assertEqual(quote.bid, 100.9)
+        self.assertEqual(quote.ask, 101.1)
+        self.assertEqual(quote.source, "Binance Spot")
+        self.assertEqual(session.requests[0][1]["params"]["symbol"], "BTCUSDT")
+
+    def test_kraken_live_quote_parses_public_ticker(self) -> None:
+        session = FlexibleGetSession(
+            RequestResponse(
+                {
+                    "error": [],
+                    "result": {
+                        "XXBTZUSD": {
+                            "c": ["101.0", "0.1"],
+                            "b": ["100.9", "1", "1"],
+                            "a": ["101.1", "1", "1"],
+                            "v": ["10", "12.5"],
+                            "o": "100.0",
+                        }
+                    },
+                }
+            )
+        )
+
+        quote = KrakenLiveQuoteClient(session=session).quote_snapshot(
+            Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")
+        )
+
+        self.assertEqual(quote.last, 101.0)
+        self.assertEqual(quote.change_percent, 1.0)
+        self.assertEqual(quote.source, "Kraken")
+        self.assertEqual(session.requests[0][1]["params"]["pair"], "XBTUSD")
+
+    def test_coinbase_live_quote_parses_public_ticker(self) -> None:
+        session = FlexibleGetSession(
+            RequestResponse(
+                {
+                    "price": "101.0",
+                    "bid": "100.9",
+                    "ask": "101.1",
+                    "volume": "12.5",
+                    "time": "2026-06-08T20:00:00Z",
+                }
+            )
+        )
+
+        quote = CoinbaseLiveQuoteClient(session=session).quote_snapshot(
+            Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")
+        )
+
+        self.assertEqual(quote.last, 101.0)
+        self.assertEqual(quote.source, "Coinbase Exchange")
+        self.assertIn("/products/BTC-USD/ticker", session.requests[0][0])
+
+    def test_nfin_live_quote_parses_nested_us_quote(self) -> None:
+        session = FlexibleGetSession(
+            RequestResponse(
+                {
+                    "data": {
+                        "quote": {
+                            "symbol": "AAPL",
+                            "lastSalePrice": "$101.00",
+                            "previousClose": "100",
+                            "bidPrice": "100.90",
+                            "askPrice": "101.10",
+                            "shareVolume": "123456",
+                            "marketStatus": "REGULAR",
+                        }
+                    }
+                }
+            )
+        )
+
+        quote = NfinLiveQuoteClient(session=session).quote_snapshot(Instrument("AAPL", "Apple"))
+
+        self.assertEqual(quote.last, 101.0)
+        self.assertEqual(quote.change, 1.0)
+        self.assertEqual(quote.change_percent, 1.0)
+        self.assertEqual(quote.source, "nfin Nasdaq")
+        self.assertIn("/v1/quote/AAPL", session.requests[0][0])
+
+    def test_live_quote_service_prefers_crypto_exchanges_then_us_nfin(self) -> None:
+        class Empty:
+            enabled = True
+
+            def quote_snapshot(self, _instrument):
+                raise RuntimeError("missing")
+
+        class Working:
+            enabled = True
+
+            def __init__(self, source: str) -> None:
+                self.source = source
+
+            def quote_snapshot(self, _instrument):
+                return QuoteSnapshot(last=101.0, source=self.source)
+
+        service = LiveQuoteService(
+            binance=Empty(),
+            kraken=Working("Kraken"),
+            coinbase=Working("Coinbase"),
+            nfin=Working("nfin Nasdaq"),
+            alpaca=Empty(),
+            finnhub=Empty(),
+            twelve=Empty(),
+        )
+
+        self.assertEqual(
+            service.quote_snapshot(Instrument("BTC-USD", "Bitcoin", quote_type="Crypto")).source,
+            "Kraken",
+        )
+        self.assertEqual(service.quote_snapshot(Instrument("AAPL", "Apple")).source, "nfin Nasdaq")
 
 
 class NfinCalendarTests(unittest.TestCase):
@@ -716,6 +881,18 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(quote.change_percent, 1.24)
         self.assertEqual(quote.volume, 123456)
         self.assertEqual(quote.market_state, "REGULAR")
+
+    def test_quote_snapshot_prefers_live_quote_service_before_yahoo(self) -> None:
+        class LiveQuotesStub:
+            def quote_snapshot(self, instrument):
+                return QuoteSnapshot(last=202.0, source="nfin Nasdaq")
+
+        provider = MarketDataProvider(live_quotes=LiveQuotesStub())
+
+        quote = provider.quote_snapshot(Instrument("AAPL", "Apple"), include_slow_info=False)
+
+        self.assertEqual(quote.last, 202.0)
+        self.assertEqual(quote.source, "nfin Nasdaq")
 
     def test_quote_snapshot_can_skip_slow_info_for_watchlist_ticks(self) -> None:
         class TickerStub:

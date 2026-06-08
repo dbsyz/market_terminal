@@ -123,12 +123,12 @@ different licensing, latency, and coverage constraints.
 
 | Asset class | Best free/public first source | Coverage | Access | Caveats |
 | --- | --- | --- | --- | --- |
-| Crypto spot | Kraken WebSocket v2 ticker BBO and Binance Spot WebSocket `bookTicker`/trade streams | Exchange-listed crypto pairs | No key for public market data | Best true free live-tick coverage. Exchange-specific, not consolidated. Existing `mm_core` already has a Kraken BBO collector/adapter and latency QA; reuse its parsing/reconnect patterns. Binance is already used in Market Terminal for crypto bars/quotes and should be extended to WebSocket ticks for Binance-listed pairs. |
-| Crypto broad fallback | Coinbase Exchange public WebSocket ticker/ticker_batch | Coinbase-listed crypto pairs | No key for public market data | Useful fallback for USD pairs and US-accessible venue coverage. Still exchange-specific. |
-| US equities/ETFs | nfin Nasdaq API batch/current quote routes | Nasdaq-sourced quote/summary data for many US-listed symbols | Anonymous no-key limits; optional key for higher limits | Good no-setup REST quote candidate for desktop watchlist refresh, but not a streaming tick feed. Treat source as Nasdaq/nfin and show freshness. |
-| US equities/ETFs streaming | Alpaca Basic IEX WebSocket, Finnhub quote/WebSocket | US-listed names | Free account/API key | Not consolidated SIP. Alpaca Basic is real-time IEX only, limited symbol subscriptions; Finnhub provides real-time US stock quotes and WebSocket but one connection per key and free-tier limits need validation. Good optional sources when the user configures keys. |
+| Crypto spot | Binance Spot REST live snapshot, Kraken REST live snapshot, Coinbase Exchange REST live snapshot; WebSocket upgrade next | Exchange-listed crypto pairs | No key for public market data | Implemented in `live_quotes.py` as the no-dependency desktop polling path. Exchange-specific, not consolidated. Existing `mm_core` remains the reference for the future persistent Kraken WebSocket BBO adapter. |
+| Crypto broad fallback | Coinbase Exchange public ticker snapshot | Coinbase-listed crypto pairs | No key for public market data | Implemented as fallback for major USD pairs and US-accessible venue coverage. Still exchange-specific. |
+| US equities/ETFs | nfin Nasdaq quote route | Nasdaq-sourced quote/summary data for many US-listed symbols | Anonymous no-key limits; optional key for higher limits | Implemented as the no-setup REST quote candidate for desktop watchlist and selected-chart refresh. Treat source as Nasdaq/nfin and show freshness. |
+| US equities/ETFs streaming | Alpaca Basic IEX quote/trade snapshots, Finnhub quote endpoint; WebSocket upgrade next | US-listed names | Free account/API key | Implemented as optional keyed snapshot sources. Not consolidated SIP. Alpaca Basic is IEX-only; Finnhub free-tier limits need monitoring. |
 | US options | Alpaca Basic indicative options feed | US options | Free account/API key | Indicative only, not OPRA real-time. Use only with explicit labeling. |
-| International equities/ETFs/funds | Twelve Data REST/WebSocket trial/free access where plan allows | Broad global symbols, FX, crypto, commodities | Free API key; credits and WebSocket trial limits | Best broad multi-asset candidate, but free credits are limited and plan availability varies by symbol/market. Use as optional keyed fallback, not default. |
+| International equities/ETFs/funds | Twelve Data REST quote endpoint; WebSocket upgrade next | Broad global symbols, FX, crypto, commodities | Free API key; credits and WebSocket trial limits | Implemented as optional keyed broad fallback. Free credits are limited and plan availability varies by symbol/market. |
 | FX | OANDA practice/live account pricing stream, Twelve Data, Finnhub | Major FX pairs | Account/API key | OANDA is broker-pricing, not consolidated interbank; regional API availability varies. Twelve Data free/trial can cover FX but credits apply. Finnhub streaming has broker exclusions for some FX feeds. |
 | Indices | nfin/Nasdaq index quote routes, Alpaca/Finnhub where supported, Yahoo fallback | US index snapshots and proxies | No-key/keyed depending on source | True exchange-level real-time index data is licensing-sensitive. Prefer live ETF proxies such as SPY/QQQ for ticking dashboards when exact index tick is unavailable. |
 | Commodities/rates | Exchange-listed ETFs/futures proxies via equity/crypto/FX providers | GLD, SLV, USO, TLT, futures ETFs; limited spot proxies | Same as equity/ETF source | Free true real-time futures/commodity feeds are generally not available. Use liquid ETF proxies for live monitoring and official daily sources for macro/rates context. |
@@ -136,13 +136,13 @@ different licensing, latency, and coverage constraints.
 
 Recommended live-price implementation order:
 
-1. Build a `live_quotes.py` service with a normalized `LiveQuote` model and source/freshness metadata.
-2. Reuse `mm_core` Kraken WebSocket v2 ticker BBO adapter for Kraken-listed crypto, especially BTC/EUR.
-3. Add Binance Spot WebSocket ticks for Binance-listed crypto pairs already mapped in Market Terminal.
-4. Add nfin REST batch quote refresh for US-listed watchlist/selected-ticker quotes where WebSocket is not configured.
-5. Add optional keyed Alpaca IEX and Finnhub adapters for US equities/ETFs streaming, clearly labeled as IEX-only or provider-limited.
-6. Add optional Twelve Data for broad international/FX coverage after validating free credit behavior and symbol entitlements.
-7. Keep Yahoo/yfinance as fallback and provenance-labeled backup, not the primary live ticker source.
+1. Build a `live_quotes.py` service with normalized source/freshness metadata. Done for REST snapshot polling.
+2. Add Binance, Kraken, and Coinbase public crypto snapshot routes. Done.
+3. Add nfin REST quote refresh for US-listed watchlist/selected-ticker quotes. Done.
+4. Add optional keyed Alpaca IEX, Finnhub, and Twelve Data snapshot adapters. Done.
+5. Keep Yahoo/yfinance as fallback and provenance-labeled backup, not the primary live ticker source. Done in `MarketDataProvider.quote_snapshot()`.
+6. Reuse `mm_core` Kraken WebSocket v2 ticker BBO adapter for persistent streaming ticks.
+7. Add Binance Spot WebSocket ticks for Binance-listed crypto pairs already mapped in Market Terminal.
 
 ## Suggested Implementation Milestones
 

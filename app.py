@@ -107,6 +107,7 @@ SEARCH_DEBOUNCE_MS = 275
 SOURCE_WATCH_INTERVAL_MS = 1000
 RUNTIME_SOURCE_FILES = (
     "app.py",
+    "live_quotes.py",
     "models.py",
     "providers.py",
     "provider_registry.py",
@@ -133,6 +134,7 @@ WATCHLIST_PRIORITY_PAUSE_MS = 20000
 WATCHLIST_CLOSED_REFRESH_INTERVAL_MS = 1800000
 EVENT_GROUP_LOAD_DELAY_MS = 3500
 WATCHLIST_TICK_FLASH_MS = 900
+CHART_LIVE_QUOTE_INTERVAL_MS = 3000
 CHART_TOP_OVERLAY_Y = 6
 CHART_HEADER_LINE_GAP = 21
 PRICE_RENDER_MODES = (
@@ -335,6 +337,8 @@ class MarketTerminalApp(tk.Tk):
         self.search_request_id = 0
         self.search_after_id: str | None = None
         self.chart_request_id = 0
+        self.chart_quote_request_id = 0
+        self.chart_quote_after_id: str | None = None
         self.current_frame = pd.DataFrame()
         self.current_frames: dict[str, pd.DataFrame] = {}
         self.current_series_colors: dict[str, str] = {}
@@ -4143,6 +4147,7 @@ class MarketTerminalApp(tk.Tk):
     def refresh_chart(self) -> None:
         if not self.chart_instruments:
             return
+        self._cancel_chart_live_quote_refresh()
         self.beta_model_stats = None
         if self.betas_comparison_var.get():
             self._update_series_tree()
@@ -4295,6 +4300,63 @@ class MarketTerminalApp(tk.Tk):
             + (f" + {technical_study_label(self.technical_study)}" if self.technical_study else "")
             + f" | Updated {datetime.now():%Y-%m-%d %H:%M:%S}"
         )
+        self._refresh_chart_live_quote(primary, frame)
+
+    def _refresh_chart_live_quote(self, instrument: Instrument, frame: pd.DataFrame) -> None:
+        self.chart_quote_after_id = None
+        self.chart_quote_request_id += 1
+        request_id = self.chart_quote_request_id
+        self._run_background(
+            lambda: self.provider.quote_snapshot(instrument, include_slow_info=False),
+            lambda quote: self._update_chart_live_quote(request_id, instrument, frame, quote),
+            "Live quote failed",
+            lambda: request_id == self.chart_quote_request_id
+            and self.selected_instrument is not None
+            and self.selected_instrument.symbol == instrument.symbol,
+            lambda _exc: self._schedule_chart_live_quote_refresh(request_id, instrument, frame),
+        )
+
+    def _update_chart_live_quote(
+        self,
+        request_id: int,
+        instrument: Instrument,
+        frame: pd.DataFrame,
+        quote,
+    ) -> None:
+        if (
+            request_id != self.chart_quote_request_id
+            or self.selected_instrument is None
+            or self.selected_instrument.symbol != instrument.symbol
+        ):
+            return
+        text = chart_live_quote_summary_text(instrument, frame, quote)
+        if text:
+            self.chart_header_summary_var.set(text)
+            self.quote_var.set(quote_source_text(quote))
+        self._schedule_chart_live_quote_refresh(request_id, instrument, frame)
+
+    def _schedule_chart_live_quote_refresh(
+        self,
+        request_id: int,
+        instrument: Instrument,
+        frame: pd.DataFrame,
+    ) -> None:
+        if (
+            request_id != self.chart_quote_request_id
+            or self.selected_instrument is None
+            or self.selected_instrument.symbol != instrument.symbol
+        ):
+            return
+        self._cancel_chart_live_quote_refresh()
+        self.chart_quote_after_id = self.after(
+            CHART_LIVE_QUOTE_INTERVAL_MS,
+            lambda: self._refresh_chart_live_quote(instrument, frame),
+        )
+
+    def _cancel_chart_live_quote_refresh(self) -> None:
+        if self.chart_quote_after_id:
+            self.after_cancel(self.chart_quote_after_id)
+            self.chart_quote_after_id = None
 
     def _refresh_sec_context(self, instrument: Instrument) -> None:
         symbol = instrument.symbol.strip().upper()
@@ -5184,6 +5246,7 @@ class MarketTerminalApp(tk.Tk):
         self.figure.subplots_adjust(left=0.035, right=0.905, top=0.985, bottom=0.085)
 
     def _clear_chart(self, text: str) -> None:
+        self._cancel_chart_live_quote_refresh()
         self.current_frame = pd.DataFrame()
         self.current_frames = {}
         self.current_series_colors = {}
@@ -5900,6 +5963,50 @@ def chart_header_summary_text(
     if aum:
         parts.append(f"AUM {aum}")
     return "  |  ".join(parts)
+
+
+def chart_live_quote_summary_text(instrument: Instrument, frame: pd.DataFrame, quote) -> str:
+    last = getattr(quote, "last", None)
+    if last is None:
+        return ""
+    currency = f" {instrument.currency}" if instrument.currency else ""
+    change = getattr(quote, "change", None)
+    change_percent = getattr(quote, "change_percent", None)
+    parts = [instrument.symbol]
+    if instrument.isin:
+        parts.append(instrument.isin)
+    parts.append(f"{last:,.2f}{currency}")
+    if change is not None and change_percent is not None:
+        parts.append(f"{change:+,.2f} ({change_percent:+.2f}%)")
+    elif change_percent is not None:
+        parts.append(f"{change_percent:+.2f}%")
+    elif change is not None:
+        parts.append(f"{change:+,.2f}")
+    volume = getattr(quote, "volume", None)
+    if volume is not None:
+        parts.append(f"Vol {format_volume_value(volume)}")
+    elif "Volume" in frame.columns and not frame.empty:
+        history_volume = pd.to_numeric(frame["Volume"], errors="coerce").dropna()
+        if not history_volume.empty:
+            parts.append(f"Vol {format_volume_value(float(history_volume.iloc[-1]))}")
+    source = quote_source_text(quote)
+    if source:
+        parts.append(source)
+    return "  |  ".join(parts)
+
+
+def quote_source_text(quote) -> str:
+    source = str(getattr(quote, "source", "") or "").strip()
+    if not source:
+        return ""
+    as_of = getattr(quote, "as_of", None)
+    if as_of is None:
+        return source
+    timestamp = pd.Timestamp(as_of)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    local_timestamp = timestamp.tz_convert(datetime.now().astimezone().tzinfo)
+    return f"{source} {local_timestamp:%H:%M:%S}"
 
 
 def format_billions(value: float | None) -> str:
